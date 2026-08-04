@@ -1,0 +1,24 @@
+# Data — shared via Drive, never committed
+data/
+*.csv
+*.parquet
+
+# R / Quarto artifacts
+.Rproj.user/
+.Rhistory
+.RData
+.Renviron
+/.quarto/
+*_files/
+*_cache/
+/_site/
+*.html
+
+# References
+GIS_Project_Methodology.docx
+analysis_clean.qmd
+*.docx
+
+# OS junk
+.DS_Store
+Thumbs.db

@@ -1,0 +1,658 @@
+---
+title: "Geospatial Analysis with KDE"
+format: html
+---
+
+```{r}
+library(tidyverse)
+library(sf)
+library(tidycensus)
+library(tigris)
+options(tigris_use_cache = TRUE)
+library(spdep)
+library(spatstat)
+library(spatstat.geom)
+```
+
+## Load data and filter to date windows (2006 - 2019)
+
+```{r}
+# load complaint csv
+df <- read.csv("data/violent_felony_cleaned_13.csv") 
+
+# parse dates and derive year
+df <- df %>%
+  mutate(year = as.integer(format(as.Date(complaint_date), "%Y"))) %>%
+  filter(year <= 2019, lat != 0, long != 0)
+
+nrow(df)
+table(df$year)
+```
+
+## Convert complaint data to spatial object
+
+```{r}
+# before
+crimes_before <- df %>%
+  filter(year >= 2010, year <= 2012) %>%
+  st_as_sf(coords = c("long", "lat"), crs = 4326) %>%
+  st_transform(32118)
+
+nrow(crimes_before)
+st_bbox(crimes_before)
+```
+
+## Pull NYC Land Boundary
+
+```{r}
+#download all New York state polygons from 2010 as sf objects, keep only 5 NYC boroughs
+nyc_counties <- c("005", "047", "061", "081", "085")
+nyc <- counties(state = "NY", year = 2010, class = "sf") %>%
+  filter(COUNTYFP10 %in% nyc_counties)
+
+#download NYC's water area polygons
+water <- area_water(state = "NY", county = nyc_counties, year = 2011, class = "sf")
+
+nyc_land <- nyc %>%
+  st_transform(32118) %>% # reprojects from lat/long into EPSG 32118 in meters
+  st_union() %>% #combines all borough polygons into one NYC polygon
+  st_difference(water %>% st_transform(32118) %>% st_union()) #removes water polygons to get land area in NYC only
+
+plot(st_geometry(nyc_land))
+st_area(nyc_land)
+```
+
+```{r}
+# convert sf polygon to spatstat "owin"
+win <- as.owin(nyc_land)
+
+#get points coordinates out of sf object
+xy <- st_coordinates(crimes_before)
+
+# create point pattern within window
+pts_before <- ppp(x = xy[,1], y = xy[,2], window = win)
+
+pts_before
+cat("Unique locations:", npoints(unique(pts_before)), "of", npoints(pts_before), "\n")
+```
+
+Note from above: complain coordinates are not true event locations (only \~52k unique locations for 201k records), which means they are geocoded administrative locations snapped to address points. Patternizr's KDE were built from a similar kind of address-snapped complaint data, so the ppp surface inherits same discretization as Wood & Levine.
+
+## Bandwidth - "sigma" as the knob of granularity
+
+```{r}
+dens_before <- density.ppp(
+  pts_before,
+  sigma = 1000, # bandwidth in meters
+  eps = 250, # output pixel size in meters
+  edge = TRUE # edge correction
+)
+
+plot(dens_before, main = "Violent felony complaint density, 2010-2012 (sigma = 1km)")
+plot(st_geometry(nyc_land), add = TRUE, border = "white", lwd = 0.5)
+```
+
+```{r}
+#check how much variation is on surface
+v <- as.vector(dens_before$v)
+v <- v[!is.na(v)]
+summary(v)
+cat("Ratio of 95th to 5th percentile:", 
+    round(quantile(v, 0.95) / quantile(v, 0.05), 1), "\n")
+```
+
+Note for above: Wood & Levine's coarsened bins carve NYC into 11 box, but the density map shows that a nine-mile bin would include hot and cold spots into one value. The KDE instead has a gradient with 86x peak - so densest crime locations have 86 times more complaints than the sparsest. Argument: coarsening could not have removed the geographic signal. Also: the raw values are tiny because density.ppp returns intensity (expected points per square meter). Multiplying by 1e6 gives complaints per km squared, which is what the colorbar shows (use per-km squared in the paper.)
+
+```{r}
+#bandwidth sweep (500m - 4000m)
+sigmas <- c(500, 1000, 2000, 4000)
+
+dens_list <- lapply(sigmas, function(s) {
+  density.ppp(pts_before, sigma = s, eps = 250, edge = TRUE)
+})
+names(dens_list) <- paste0("sigma_", sigmas)
+
+# plot
+par(mfrow = c(1, 4), mar = c(1, 1, 2, 1))
+for (i in seq_along(sigmas)) {
+  plot(dens_list[[i]], main = paste0("sigma = ", sigmas[i], "m"), ribbon = FALSE)
+}
+par(mfrow = c(1, 1))
+
+#each bandwidth's range
+for (i in seq_along(sigmas)) {
+  v <- as.vector(dens_list[[i]]$v); v <- v[!is.na(v)]
+  cat(sprintf("sigma = %5dm | 95th/5th ratio = %6.1f | max = %.0f per km2\n",
+              sigmas[i], quantile(v, .95)/quantile(v, .05), max(v) * 1e6))
+}
+
+```
+
+Note for above: As we increase the bandwidth, spital contrast collapses (500m to 4000m destroys roughly 94% of range). This supports the argument that spatial resolution determines how much crime-geography signal survives. 4000m is roughly precint-scale and can be used as proxy for what precinct-level analysis can show, while the 500m is what Patternizr's uncoarsened KDE features perceive. The location representation that mimics what Patternizr uses retains roughly sixteen times the spatial contrast of a precinct-scale view (410.8 vs 26.1), and vastly more than the 11-bin categorical features the anti-proxy defense relies on.
+
+## Build grid
+
+```{r}
+grid <- st_make_grid(nyc_land, cellsize = 500, square = TRUE) %>%
+  st_as_sf() %>%
+  mutate(cell_id = row_number())
+
+# only keep squares that touch land
+grid <- grid[st_intersects(grid, nyc_land, sparse = FALSE)[,1], ]
+
+nrow(grid)
+plot(st_geometry(grid), lwd = 0.1)
+plot(st_geometry(nyc_land), add = TRUE, border = "red")
+```
+
+## Pull 2010 Census Blocks and Demographics
+
+```{r}
+# block geoms 2010
+blocks_2010 <- blocks(state = "NY", county = nyc_counties, year = 2010, class = "sf")
+
+# block demos 2010 P003 = race, P004 = Hispanic origin
+p003 <- get_decennial(
+  geography = "block", state = "NY", county = nyc_counties, year = 2010,
+  variables = c(total = "P003001", white = "P003002", black = "P003003"),
+  output = "wide", geometry = FALSE
+)
+
+p004 <- get_decennial(
+  geography = "block", state = "NY", county = nyc_counties, year = 2010,
+  variables = c(hispanic = "P004003"),
+  output = "wide", geometry = FALSE
+)
+
+# P005003 = Not Hispanic or Latino: White alone
+p005 <- get_decennial(
+  geography = "block", state = "NY", county = nyc_counties, year = 2010,
+  variables = c(nhwhite = "P005003"),
+  output = "wide", geometry = FALSE
+)
+
+
+blocks_demo <- blocks_2010 %>%
+  left_join(p003, by = c("GEOID10" = "GEOID")) %>%
+  left_join(p004, by = c("GEOID10" = "GEOID")) %>%
+  left_join(p005, by = c("GEOID10" = "GEOID")) %>%
+  st_transform(32118)
+
+nrow(blocks_demo)
+sum(blocks_demo$total, na.rm = TRUE)
+```
+
+## Allocate 2010 Census Blocks to Grid
+
+```{r}
+blocks_demo <- blocks_demo %>%
+  mutate(block_area = as.numeric(st_area(.)))
+
+alloc <- st_intersection(blocks_demo, grid) %>%
+  mutate(weight = as.numeric(st_area(.)) / block_area)
+
+cell_demo <- alloc %>%
+  st_drop_geometry() %>%
+  group_by(cell_id) %>%
+  summarise(
+    pop      = sum(total    * weight, na.rm = TRUE),
+    black    = sum(black    * weight, na.rm = TRUE),
+    white    = sum(white    * weight, na.rm = TRUE),
+    hispanic = sum(hispanic * weight, na.rm = TRUE),
+    nhwhite  = sum(nhwhite  * weight, na.rm = TRUE)
+  )
+```
+
+Note for above: our areal weighting assumes population is uniformly distributed within each block. Blocks are small in NYC (approx. 200 residents each).
+
+## Join Crime Density and Demographics (DESCRIPTIVE ONLY)
+
+```{r}
+library(stars)
+
+#sample KDE surface at each cell (mean density within the cell)
+kde_stars <- st_as_stars(dens_before)
+st_crs(kde_stars) <- 32118
+
+grid_full <- grid %>%
+  mutate(crime_density = aggregate(kde_stars, grid, FUN = mean, na.rm = TRUE)[[1]] * 1e6) %>%
+  left_join(cell_demo, by = "cell_id") %>%
+  mutate(
+    pct_black    = 100 * black    / pop,
+    pct_white    = 100 * white    / pop,
+    pct_hispanic = 100 * hispanic / pop,
+    pct_minority = 100 * (pop - nhwhite) / pop,
+    pop_density  = pop / 0.25          # residents per km2 (cell = 0.25 km2)
+  )
+
+summary(grid_full$crime_density)
+summary(grid_full$pop)
+sum(is.na(grid_full$pct_black))
+```
+
+Note for above: Cells with fewer than 100 residents were exluded as unpopulated/minimally populated. The 2,699 cells retained contain 99.7% of NYC's 2010 population (see below cell).
+
+```{r}
+# CHECK How many cells survive at various population thresholds
+for (t in c(0, 25, 50, 100, 200, 400)) {
+  keep <- grid_full$pop >= t & !is.na(grid_full$crime_density)
+  cat(sprintf("pop >= %4d : %4d cells (%.1f%% of pop retained)\n",
+              t, sum(keep, na.rm = TRUE),
+              100 * sum(grid_full$pop[keep], na.rm = TRUE) / sum(grid_full$pop, na.rm = TRUE)))
+}
+```
+
+```{r}
+cells <- grid_full %>%
+  filter(pop >= 100, !is.na(crime_density))
+
+nrow(cells)
+summary(cells$pct_black)
+summary(cells$crime_density)
+summary(cells$pct_minority)
+```
+
+## Regression Test
+
+```{r}
+#naive numbers
+cor(cells$crime_density, cells$pct_black, method = "pearson")
+cor(cells$crime_density, cells$pct_black, method = "spearman")
+```
+
+Note for above: The baseline shows Pearson 0.40 and Spearmam 0.56. There is a moderate-to-substantial positive association that cells with higher Black population share have higher crime complaint density. The gap between them indicates the relationship is monotonic but nonlinear aaka density does rise with percent Black but not in a straight line. Suggests a linear model will understate the assoication somewhat.
+
+```{r}
+# test: regression ladder
+
+#baseline model that explains pop/crowding explains variation
+m1 <- lm(crime_density ~ pop_density, data = cells)
+
+# adds black share
+m2 <- lm(crime_density ~ pct_black + pop_density, data = cells)
+
+#adds hispanic share
+m3 <- lm(crime_density ~ pct_black + pct_hispanic + pop_density, data = cells)
+
+#collapses race/eth into minority group
+m4 <- lm(crime_density ~ pct_minority + pop_density, data = cells)
+
+round(coef(m1), 3); round(coef(m2), 3); round(coef(m3), 3); round(coef(m4), 3)
+round(c(m1 = summary(m1)$r.squared, m2 = summary(m2)$r.squared,
+        m3 = summary(m3)$r.squared, m4 = summary(m4)$r.squared), 3)
+```
+
+Note for above: The models each regress complaint density per km-squared on a different set of predictors across the 2,699 cells. Each coefficient answers: if this variable goes up by one unit, how much does crime density change, holding the others fixed?
+
+-   The Black coefficient is 3.19. Each additional percentage point of Black population share is associated with ~3.2 more violent-felony complaints per km-squared — controlling for Hispanic share and for how crowded the cell is. Across the observed range of pct_black (0 to 96%), that's a swing of roughly 300 complaints/km-squared, against a citywide mean of 294.
+
+-   Population density alone gets 0.384, adding race/ethnicity gets us to 0.588. Racial composition adds ~20 points of R-squared beyond crowding.
+
+-   Hispanic share matters at least as much as Black share (3.85 vs 3.19), and the two are not interchangeable. m4 proves the latter: collapsing them into one "minority" variable loses explanatory power (0.588 to 0.512).
+
+Maybe we can't say KDE is a proxy for Black population - instead the complain-density surface encodes racial and ethnic composition robustly and for multiple groups simultaneously.
+
+```{r}
+#test: Morans I on residuals
+nb <- poly2nb(cells, queen = TRUE)
+lw <- nb2listw(nb, style = "W", zero.policy = TRUE)
+
+lm.morantest(m3, lw, zero.policy = TRUE)
+```
+Note for above: Every p-value from OLS depends on the assumption that observations are independent, but this test shows they aren't. After controlling for race, ethnicity, and crowding, cells with under-predicted crime density sit next to other under-predicted cells. Thus the standard error and p-values of m1-m4 are invalid, though the coefficients themselves and the R-squared values remain valid.
+
+# Two forms of spatial dependence: lag and error. Which is it???
+Lag: crime density in a cell depends on crime density in neighboring cell 
+- y = ρ·(neighbors' y) + βX + ε
+Error: An omitted variable (land use, transit, etc) varies smoothly across space and lands in the residual
+- y = βX + u, where u = λ·(neighbors' u) + ε
+```{r}
+# test: Lagrange Multiplier 
+lm.RStests(m3, lw, test = c("RSerr", "RSlag", "adjRSerr", "adjRSlag"), zero.policy = TRUE)
+```
+Notes for above: The large adjRSlag shows that crime density in one cell is partly a function of crime density in neighboring cells aka spatial spillover. (KDE surface is a spatial averaging operator so the lag is partially an artifact of each complaint being spread across neighboring cells by the kernel)
+
+With that, coefficient on pct_black is not total effect becaue each cell feeds into its neighbors and they feed back. So need to compute direct( a cell's own black share on own crime density), indirect (spillover effect into other cells), and total impact (direct + indirect). Total will compare to OLS coefficient of 3.19
+```{r}
+library(spatialreg)
+
+m_lag <- lagsarlm(crime_density ~ pct_black + pct_hispanic + pop_density,
+                  data = cells, listw = lw, zero.policy = TRUE)
+
+summary(m_lag)
+```
+
+# Changing to use raw counts instead of KDE...
+```{r}
+# count complaint points per cell (unsmoothed)
+crimes_before$cell_id <- st_join(crimes_before, grid, join = st_within)$cell_id
+
+counts <- crimes_before %>%
+  st_drop_geometry() %>%
+  filter(!is.na(cell_id)) %>%
+  count(cell_id, name = "crime_count")
+
+cells_ct <- grid %>%
+  left_join(counts, by = "cell_id") %>%
+  mutate(crime_count = replace_na(crime_count, 0)) %>%  
+  left_join(cell_demo, by = "cell_id") %>%
+  mutate(
+    crime_density = crime_count / 0.25,         # complaints per km2
+    log_density   = log(crime_density + 1),    # log transform for skew
+    pct_black     = 100 * black    / pop,
+    pct_hispanic  = 100 * hispanic / pop,
+    pct_minority  = 100 * (pop - nhwhite) / pop,
+    pop_density   = pop / 0.25
+  ) %>%
+  filter(pop >= 100)
+
+nrow(cells_ct)
+summary(cells_ct$crime_count)
+summary(cells_ct$log_density)
+```
+
+```{r}
+m1 <- lm(log_density ~ pop_density, data = cells_ct)
+m2 <- lm(log_density ~ pct_black + pop_density, data = cells_ct)
+m3 <- lm(log_density ~ pct_black + pct_hispanic + pop_density, data = cells_ct)
+m4 <- lm(log_density ~ pct_minority + pop_density, data = cells_ct)
+
+round(coef(m1), 4); round(coef(m2), 4); round(coef(m3), 4); round(coef(m4), 4)
+round(c(m1 = summary(m1)$r.squared, m2 = summary(m2)$r.squared,
+        m3 = summary(m3)$r.squared, m4 = summary(m4)$r.squared), 3)
+```
+Notes for above: Each additional percentage point of Black share is associated with about 1.6% higher complaint density (logged dependent variable), holding Hisapnic share and crowding (population) fixed. On the combined minority model, the complaint surface tracks minority composition broadbly with both Black and Hispanic share contributing similiarily. Earlier finding that Hispanid dominated was an artifcat of KDE smoothing. note the logged value:  every 10-percentage-point increase in Black share is associated with e^(0.0164 × 10) ≈ e^0.164 ≈ 1.18×, i.e. about 18% higher complaint density.
+```{r}
+nb <- poly2nb(cells_ct, queen = TRUE)
+lw <- nb2listw(nb, style = "W", zero.policy = TRUE)
+
+lm.morantest(m3, lw, zero.policy = TRUE)
+```
+Note for above: Compared to the KDE, the residual autocorrelation on raw complaint counts is halved to a level consistent with genuine spatial clustering. 
+```{r}
+lm.RStests(m3, lw, test = c("RSerr", "RSlag", "adjRSerr", "adjRSlag"), zero.policy = TRUE)
+```
+Note for above: Moran's I confirmed spatial dependence exists but not which kind. The RS/LM tests distinguish two forms: lag (crime density in a cell depends on neighboring cells' crime density) vs. error (an omitted variable like land use, transit, or police deployment varies smoothly across space and lands in the residual). RSerr/RSlag are both inflated because strong dependence of either type makes the other fire too. The adjusted versions each test for one form while controlling for the other. Here adjRSerr (272.9) far exceeds adjRSlag (64.0), so the residual clustering is driven by spatially-structured omitted variables, not cell-to-cell spillover - so we fit a spatial error model. Note this is the opposite of what the KDE-surface DV indicated (which picked lag).
+
+```{r}
+library(spatialreg)
+
+m_err <- errorsarlm(log_density ~ pct_black + pct_hispanic + pop_density,
+                    data = cells_ct, listw = lw, zero.policy = TRUE)
+
+summary(m_err)
+```
+Notes for above: This is the model we report: Lambda = 0.67 confirms substantial but healthy spatial dependence. After correcting for it, pct_black remains significant with a valid standard error (0.0116, z = 8.4), reduced approx. 30% from the OLS estimate showing that part of the raw association was spatially-structured confounding (deployment, land use), but a real association survives. It shows ~12% higher complaint density per 10 points of Black share, ~3x across the full range, controlling for Hispanic share, crowding, and spatial confounders. Hispanic share behaves comparably (0.0171). AIC strongly prefers this model over OLS (7,370 vs 8,162).
+
+# What happens to demographic signal as the bins get bigger/coarser? 
+```{r}
+library(spatialreg)
+
+run_scale <- function(cellsize, blocks_demo, crimes_before, nyc_land, pop_floor = 100) {
+  cell_area_km2 <- (cellsize / 1000)^2
+  if (!"block_area" %in% names(blocks_demo))
+    blocks_demo$block_area <- as.numeric(st_area(blocks_demo))
+
+  # grid at this scale, land-touching only
+  g <- st_make_grid(nyc_land, cellsize = cellsize, square = TRUE) %>%
+    st_as_sf() %>% mutate(cell_id = row_number())
+  g <- g[st_intersects(g, nyc_land, sparse = FALSE)[, 1], ]
+
+  # areal-weighted census allocation
+  cell_demo <- st_intersection(blocks_demo, g) %>%
+    mutate(weight = as.numeric(st_area(.)) / block_area) %>%
+    st_drop_geometry() %>%
+    group_by(cell_id) %>%
+    summarise(
+      pop      = sum(total    * weight, na.rm = TRUE),
+      black    = sum(black    * weight, na.rm = TRUE),
+      hispanic = sum(hispanic * weight, na.rm = TRUE),
+      nhwhite  = sum(nhwhite  * weight, na.rm = TRUE),
+      .groups  = "drop"
+    )
+
+  # complaint counts per cell 
+  counts <- crimes_before %>%
+    select(-any_of("cell_id")) %>%
+    st_join(g, join = st_within) %>%
+    st_drop_geometry() %>%
+    filter(!is.na(cell_id)) %>%
+    count(cell_id, name = "crime_count")
+
+  # assemble + FIXED 100 person headcount mask at every scale
+  cells <- g %>%
+    left_join(counts, by = "cell_id") %>%
+    mutate(crime_count = replace_na(crime_count, 0)) %>%
+    left_join(cell_demo, by = "cell_id") %>%
+    mutate(
+      crime_density = crime_count / cell_area_km2,
+      log_density   = log(crime_density + 1),
+      pct_black     = 100 * black    / pop,
+      pct_hispanic  = 100 * hispanic / pop,
+      pop_density   = pop / cell_area_km2
+    ) %>%
+    filter(pop >= pop_floor, !is.na(pct_black))
+
+  n_cells <- nrow(cells)
+
+  # descriptive metrics
+  var_black <- var(cells$pct_black, na.rm = TRUE)
+  cd  <- cells$crime_density[cells$crime_density > 0]
+  r95 <- if (length(cd) > 1) as.numeric(quantile(cd, .95) / quantile(cd, .05)) else NA
+  cor_p <- cor(cells$pct_black, cells$log_density, use = "complete.obs")
+
+  # model metrics — only where cells + neighbor structure support it
+  beta_raw <- beta_std <- z_black <- lambda <- ols_r2 <- NA
+  lm_pick <- NA_character_
+  if (n_cells >= 30) {
+    nb <- poly2nb(cells, queen = TRUE)
+    if (sum(card(nb)) > 0) {
+      lw    <- nb2listw(nb, style = "W", zero.policy = TRUE)
+      m_ols <- lm(log_density ~ pct_black + pct_hispanic + pop_density, data = cells)
+      ols_r2 <- summary(m_ols)$r.squared
+
+      rs <- tryCatch(lm.RStests(m_ols, lw, test = c("adjRSerr", "adjRSlag"),
+                                zero.policy = TRUE), error = function(e) NULL)
+      if (!is.null(rs))
+        lm_pick <- ifelse(unname(rs$adjRSerr$statistic) >
+                          unname(rs$adjRSlag$statistic), "error", "lag")
+
+      # use FIXED error model throughout
+      m_err <- tryCatch(errorsarlm(log_density ~ pct_black + pct_hispanic + pop_density,
+                                   data = cells, listw = lw, zero.policy = TRUE),
+                        error = function(e) NULL)
+      if (!is.null(m_err)) {
+        co       <- summary(m_err)$Coef
+        beta_raw <- co["pct_black", "Estimate"]
+        z_black  <- co["pct_black", "z value"]
+        beta_std <- beta_raw * sd(cells$pct_black) / sd(cells$log_density)
+        lambda   <- m_err$lambda
+      }
+    }
+  }
+
+  tibble(cellsize_m = cellsize, n_cells = n_cells,
+         var_pct_black = var_black, cor_pearson = cor_p,
+         ols_r2 = ols_r2, beta_raw = beta_raw, beta_std = beta_std,
+         z_black = z_black, lambda = lambda, lm_pick = lm_pick)
+}
+
+scales <- c(250, 500, 1000, 4000, 14500) 
+ladder <- bind_rows(lapply(scales, run_scale,
+                           blocks_demo = blocks_demo,
+                           crimes_before = crimes_before,
+                           nyc_land = nyc_land))
+ladder
+
+```
+
+```{r}
+ladder %>%
+  mutate(across(where(is.numeric), \(x) round(x, 4))) %>%
+  as.data.frame()
+
+# add sd of var_pct_black
+ladder <- ladder %>% mutate(sd_pct_black = sqrt(var_pct_black))
+
+```
+Note for above (resolution ladder). This cell reruns the full count as dependent variable pipeline at five cell sizes, from 250m up to 14,500m (Patternizr's 9-mile bins). The 100-person headcount floor is held fixed at every scale so demographic contrast can't be inflated by small-denominator noise at the fine end. The error model is imposed at every rung for comparability; lm_pick records what the LM diagnostic would have selected per scale (it varies — lag at 250m/4km, error at 500m/1km), so we can switch to per-scale specs if a reviewer asks. Validation: the 500m row reproduces our headline model exactly (n = 2,720, beta_raw = 0.0116, lambda = 0.67), confirming the loop faithfully rebuilds the real pipeline at every scale.
+
+As cells coarsen:
+- N (neighborhoods to compare) collapses: 8,909 to 13. Larger boxes means fewer units to compare.
+- Contrast (sd_pct_black = square root of var, in percentage points) collapses, but late: ~31 to ~30 to ~28 to ~26 holds steady all the way through precinct scale (4km), then craters to ~16 at the 9-mile bin. Most between-area demographic difference survives coarsening right up until 14.5km.
+- Association (beta_std) does NOT collapse: 0.27 to 0.21 to 0.23 to 0.18, a roughly flat band wherever it's estimable. The apparent sag is inside the error bars (at 4km, n=77, the estimate is imprecise enough to contain 0.27), so we read it as stable, not declining.
+
+The z column: these numbers are a power effect, not the effect weakening — z tracks teh square root of N and N is collapsing. Coarsening does not weaken the race–crime association, instead it destroys the two preconditions the association needs to be visible — between-area demographic contrast and the resolution (N) to compare areas. The pattern is consistent with a stable underlying association that the 9-mile scale renders undetectable by erasing contrast, rather than with the association itself weakening (interpretation). REMEMBER: 14.5km is non-estimable, so we have no coarse-scale estimate proving the signal persists there, we only show it survives everywhere we can measure.
+
+The 14,500m rung is k=3–4 (the ~11 coarse midpoint bins), and at that scale the anti-proxy defense genuinely works — no contrast, non-estimable, location cannot proxy for race. The 250m–1km rungs are where k=5–8 (the KDE location-frequency features) are and were never coarsened, and the association is strongest at that level and precisely estimated.
+
+This is a feature-input audit: we tested the complaint geography Patternizr's location features are built from, at the resolution those features preserve. We did not reconstruct the KDE feature and did not test model outputs. The contribution is "the input geography encodes racial composition at sub-precinct resolution," NOT "Patternizr's outputs are racially disparate."
+
+# FIGURE - VISUAL
+```{r}
+# SE of the standardized beta: z is scale-invariant, so SE_std = beta_std / z
+lad <- ladder %>%
+  mutate(se_std = beta_std / z_black,
+         lo = beta_std - 1.96 * se_std,
+         hi = beta_std + 1.96 * se_std)
+
+panels <- c("Between-area contrast  (SD of % Black, pts)",
+            "Standardized association  (\u03b2* on % Black)")
+
+plot_df <- bind_rows(
+  lad %>% transmute(cellsize_m, panel = panels[1],
+                    value = sd_pct_black, lo = NA_real_, hi = NA_real_),
+  lad %>% transmute(cellsize_m, panel = panels[2],
+                    value = beta_std, lo, hi)
+) %>% mutate(panel = factor(panel, levels = panels))
+
+# label for the non-estimable rung (association panel only)
+ne <- tibble(cellsize_m = 14500,
+             panel = factor(panels[2], levels = panels),
+             value = 0.17, label = "non-estimable\n(N = 13)")
+
+ggplot(plot_df, aes(cellsize_m, value)) +
+  annotate("rect", xmin = 250, xmax = 1000, ymin = -Inf, ymax = Inf,
+           fill = "#2c7fb8", alpha = 0.08) +                     # k=5–8 KDE band
+  geom_vline(xintercept = 14500, linetype = "dashed",
+             colour = "grey55", linewidth = 0.4) +               # k=3–4 (9-mile bins)
+  geom_line(colour = "grey45", linewidth = 0.5, na.rm = TRUE) +
+  geom_linerange(aes(ymin = lo, ymax = hi),
+                 colour = "#c0392b", linewidth = 0.6, na.rm = TRUE) +
+  geom_point(size = 2.4, colour = "#c0392b", na.rm = TRUE) +
+  geom_text(data = ne, aes(label = label), size = 2.9,
+            colour = "grey40", lineheight = 0.9, vjust = 1) +
+  facet_wrap(~ panel, ncol = 1, scales = "free_y", strip.position = "left") +
+  scale_x_log10(breaks = c(250, 500, 1000, 4000, 14500),
+                labels = c("250 m", "500 m", "1 km", "4 km", "14.5 km"),
+                expand = expansion(mult = c(0.05, 0.12))) +
+  labs(x = "Grid cell size (log scale)", y = NULL,
+       title = "Coarsening destroys demographic contrast, not the association",
+       subtitle = "Shaded = KDE feature scale (k=5\u20138); dashed = 9-mile coarse bins (k=3\u20134)") +
+  theme_minimal(base_size = 12) +
+  theme(strip.placement = "outside",
+        strip.text.y.left = element_text(angle = 90, face = "bold", size = 9.5),
+        panel.grid.minor = element_blank(),
+        plot.title = element_text(face = "bold", size = 12.5),
+        plot.subtitle = element_text(colour = "grey35", size = 9))
+```
+
+# Robustness Check: 2020 census and 2017-2019 crime data
+```{r}
+# 2nd crime surface (crimes after)
+crimes_after <- df %>%
+  filter(year >= 2017, year <= 2019) %>%
+  st_as_sf(coords = c("long", "lat"), crs = 4326) %>%
+  st_transform(32118)
+
+nrow(crimes_after)   # complaint count for the later window
+
+# 2020 census blocks + demographics
+# note: 2020 uses PL 94-171 table codes (P1/P2). P1 = race, P2 = Hispanic origin 
+blocks_2020 <- blocks(state = "NY", county = nyc_counties, year = 2020, class = "sf")
+
+demo_2020 <- get_decennial(
+  geography = "block", state = "NY", county = nyc_counties, year = 2020,
+  sumfile = "pl", output = "wide", geometry = FALSE,
+  variables = c(
+    total    = "P1_001N",   # total population
+    white    = "P1_003N",   # White alone
+    black    = "P1_004N",   # Black or African American alone
+    hispanic = "P2_002N",   # Hispanic or Latino
+    nhwhite  = "P2_005N"    # Not Hispanic or Latino: White alone
+  )
+)
+
+blocks_demo_2020 <- blocks_2020 %>%
+  left_join(demo_2020, by = c("GEOID20" = "GEOID")) %>%
+  st_transform(32118)
+
+#validation
+nrow(blocks_demo_2020)
+sum(blocks_demo_2020$total, na.rm = TRUE)   # should be ~8,804,190 (NYC 2020 pop)
+sum(is.na(blocks_demo_2020$total))          
+summary(blocks_demo_2020$black)             
+```
+
+```{r}
+#allocate 2020 blocks to grid, assemble, model
+
+#areal-weighted allocation 
+blocks_demo_2020 <- blocks_demo_2020 %>%
+  mutate(block_area = as.numeric(st_area(.)))
+
+cell_demo_2020 <- st_intersection(blocks_demo_2020, grid) %>%
+  mutate(weight = as.numeric(st_area(.)) / block_area) %>%
+  st_drop_geometry() %>%
+  group_by(cell_id) %>%
+  summarise(
+    pop      = sum(total    * weight, na.rm = TRUE),
+    black    = sum(black    * weight, na.rm = TRUE),
+    hispanic = sum(hispanic * weight, na.rm = TRUE),
+    nhwhite  = sum(nhwhite  * weight, na.rm = TRUE),
+    .groups  = "drop"
+  )
+
+# complaint counts per cell 
+counts_after <- crimes_after %>%
+  select(-any_of("cell_id")) %>%
+  st_join(grid, join = st_within) %>%
+  st_drop_geometry() %>%
+  filter(!is.na(cell_id)) %>%
+  count(cell_id, name = "crime_count")
+
+# assemble cells
+cells_after <- grid %>%
+  left_join(counts_after, by = "cell_id") %>%
+  mutate(crime_count = replace_na(crime_count, 0)) %>%
+  left_join(cell_demo_2020, by = "cell_id") %>%
+  mutate(
+    crime_density = crime_count / 0.25,
+    log_density   = log(crime_density + 1),
+    pct_black     = 100 * black    / pop,
+    pct_hispanic  = 100 * hispanic / pop,
+    pct_minority  = 100 * (pop - nhwhite) / pop,
+    pop_density   = pop / 0.25
+  ) %>%
+  filter(pop >= 100, !is.na(pct_black))
+
+nrow(cells_after)                 # cell count (compare to primary's 2,720)
+summary(cells_after$crime_count)
+
+# neighbors + spatial error model 
+nb_after <- poly2nb(cells_after, queen = TRUE)
+lw_after <- nb2listw(nb_after, style = "W", zero.policy = TRUE)
+
+#lm diagnostic
+m_ols_after <- lm(log_density ~ pct_black + pct_hispanic + pop_density, data = cells_after)
+lm.RStests(m_ols_after, lw_after, test = c("adjRSerr", "adjRSlag"), zero.policy = TRUE)
+
+m_err_after <- errorsarlm(log_density ~ pct_black + pct_hispanic + pop_density,
+                          data = cells_after, listw = lw_after, zero.policy = TRUE)
+summary(m_err_after)
+```
+Note for above: This is to show the race–crime density association isn't a quirk of the single 2010–2012 window. This is a cross-sectional proxy test in both eras, NOT a before/after causal test. 
+- pct_black replicates: 0.0167, z=11.0 (primary: 0.0116, z=8.4). Positive, highly significant, same order of magnitude across two windows ~7 years apart on independent census data.
+- Model structure also replicates: LM diagnostic selects error in both eras, lambda near-identical (0.65 vs 0.67), cell count matches (2,740 vs 2,720).
+- Cross-sectional proxy test in both eras — NOT a before/after causal test.
+- Do NOT overclaim the larger 2020 coefficient (0.0167 vs 0.0116, ~44% up) as "association strengthened over time" — different census vintages, shorter/lower-volume crime window, not apples-to-apples. Defensible claim is that its present and significant in both eras at comparable magnitude.
