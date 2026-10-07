@@ -1,0 +1,149 @@
+---
+title: "5100 Final Project Time Series"
+author: "Dana Kim"
+format: 
+  html:
+    embed-resources: true
+toc: true
+---
+
+We plan to do 2 different time series analyses. The first one will look at the TOTAL MONTHLY number of complaints for that race as the y-axis. The second one will look at the AVERAGE MONTHLY time it took for the crime to be reported from when it happened as the y-axis. For both cases, the variable on the x-axis will be the date of reporting. To keep the interval of time consistent, we must transform our data to be monthly. The date of reporting will become a specific month rather than the exact date a single crime was reported. Then as explained we total monthly number of complaints and average monthly time of reporting delay will be the dependent variables.
+
+For each data frame, which will contain data for ONLY ONE RACIAL GROUP:
+
+X: Reporting month
+Y1: Total number of complaints (in given month)
+Y2: Average time it takes for a crime to be reported from when it happened (in a given month)
+
+For the first analysis if we see that the total monthly number of complaints for a given race increases, it may indicate exacerbated bias from Patternizr. For the second analysis if we see reporting delay go down it could mean there is more trust in police after use of Patternizr. We need to run analyses first to be able to make any interpretations but this gives an idea of how we could interpret the information and what we are looking for. 
+
+# CLEANING THE DATA
+
+### Load in all the cleaned data without any nulls removed
+
+The data that is loaded below has no rows where the race, sex, or age is null.
+
+```{r}
+library(tidyverse)
+complaints_nonull_demographic <- read_csv("../../../data/cleaning/null_demographics_removed.csv")
+complaints_nonull_demographic
+```
+
+### Creating 7 new dataframes that contains only the variables of interest (report date, complaint date, race) and is subset to contain only ONE racial group. 
+
+After removing all null values in any of the three demographic categories (age, sex, race), we individually removed all unknown values from our individual demographic categories. For this analysis, I removed the "UNKNOWN" and "OTHER" values from the race category (since analysis on these groups may not be as meaningful). I keep only the columns we're interested in (in case it's helpful later, I will keep the time_period column too)
+
+Update: deleted time period label, see below
+
+```{r}
+#REMOVE UNKNOWN AND OTHER RACIAL GROUP
+racial_groups <- factor(unique(complaints_nonull_demographic$susp_race))
+racial_groups 
+
+complaints_nonull_demographic <- complaints_nonull_demographic |>
+  filter(susp_race != "UNKNOWN") |>
+  filter(susp_race != "OTHER")
+
+racial_groups <- unique(factor(complaints_nonull_demographic$susp_race))
+racial_groups
+
+nrow(complaints_nonull_demographic) #302,872
+
+
+#KEEP ONLY RELEVANT COLUMNS
+complaints_nonull_demographic <- complaints_nonull_demographic |>
+  dplyr::select(complaint_date, report_date, susp_race) |>
+  mutate(report_date = as.Date(report_date, format = "%m/%d/%Y"))
+
+#KEEP ONLY DATA BEFORE 2020
+complaints_nonull_demographic <- complaints_nonull_demographic |>
+  filter(report_date < as.Date("2020-01-01"))
+complaints_nonull_demographic
+```
+
+```{r}
+#SPLIT THE DATAFRAME TO CONTAIN ONLY ONE RACIAL GROUP
+race_subset <- split(complaints_nonull_demographic, complaints_nonull_demographic$susp_race)
+
+#EXTRACT TO INDIVIDUAL DATAFRAMES
+black <- race_subset[["BLACK"]]
+white <- race_subset[["WHITE"]]
+white_hispanic <- race_subset[["WHITE HISPANIC"]]
+aapi <- race_subset[["ASIAN / PACIFIC ISLANDER"]]
+black_hispanic <- race_subset[["BLACK HISPANIC"]]
+am_indian_ak_native <- race_subset[["AMERICAN INDIAN/ALASKAN NATIVE"]]
+
+
+black
+white
+white_hispanic
+aapi
+black_hispanic
+am_indian_ak_native
+```
+
+
+### Creating two new columns that will be used for our 2 different time series analyses. 
+
+These 2 new columns will be added to all 6 dataframes that are subset by racial group.
+
+Y1: Total number of complaints (in a given month)
+Y2: Average time taken to report a crime (in a given month)
+
+Although I kept time_period above, I delete it later as it confounds our cleaning process for time series analysis. The time period label in the original cleaned data is for complaint_date which is when the crime occurred, not when the crime was reported. That means our previous analyses tell us about when crimes occurred (which was a proxy for police response/activity) while the current analysis looks at how crime reporting evolves. If I kept the same time_period label here it would not match with our analysis. I could add a new time_period label but I will not for the sake of time.
+
+```{r}
+library(lubridate)
+
+aggregate_for_timeseries <- function(df) {
+  df |>
+    #sort by report_date
+    arrange(report_date) |>
+    
+    #create new report_month column
+    mutate(report_month = floor_date(report_date, "month")) |>
+    
+    #calculate delay in reporting (Report Date - Complaint Date) = number of days in delay
+    mutate(report_delay_days = as.numeric(report_date - complaint_date)) |>
+    
+    #group by the unit of analysis we're interested in - in this case, each month. we also want to keep suspect race and the time_period label
+    group_by(report_month, susp_race) |>
+    
+    #find total complaints per month AND average reporting delays per month
+    summarise(
+      total_complaints = n(),
+      avg_report_delay_days = mean(report_delay_days, na.rm = TRUE),
+      .groups = "drop"
+    )
+}
+
+#APPLY TO ALL DFS SUBSET BY RACIAL GROUP
+race_timeseries_data <- lapply(race_subset, aggregate_for_timeseries)
+
+#EXTRACT AND RE-ASSIGN TO VARIABLES FOR EXPORTING
+black <- race_timeseries_data[["BLACK"]]
+white <- race_timeseries_data[["WHITE"]]
+white_hispanic <- race_timeseries_data[["WHITE HISPANIC"]]
+aapi <- race_timeseries_data[["ASIAN / PACIFIC ISLANDER"]]
+black_hispanic <- race_timeseries_data[["BLACK HISPANIC"]]
+am_indian_ak_native <- race_timeseries_data[["AMERICAN INDIAN/ALASKAN NATIVE"]]
+
+black
+white
+white_hispanic
+aapi
+black_hispanic
+am_indian_ak_native
+```
+
+
+```{r}
+#EXPORT EACH AS CSV SO TEAMMATES CAN WORK ON SAME CLEANED DFS
+write_csv(black, "black.csv")
+write_csv(white, "white.csv")
+write_csv(white_hispanic, "white_hispanic.csv")
+write_csv(aapi, "aapi.csv")
+write_csv(black_hispanic, "black_hispanic.csv")
+write_csv(am_indian_ak_native, "am_indian_ak_native.csv")
+```
+

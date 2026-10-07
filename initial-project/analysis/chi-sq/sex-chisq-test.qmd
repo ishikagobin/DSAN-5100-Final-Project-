@@ -1,0 +1,123 @@
+---
+title: "5100 Final Project Chi-Square Test"
+author: "Dana Kim"
+format: 
+  html:
+    embed-resources: true
+toc: true
+---
+
+## Chi Square Test: is there a relationship between time period and whether the demographic category (ie for sex, male) increases?
+
+```{r}
+# CLEANING THE DATA
+
+
+library(tidyverse)
+complaints_nonull_demographic <- read_csv("../../data/cleaning/null_demographics_removed.csv")
+complaints_nonull_demographic
+```
+
+```{r}
+#CLEAN TO REMOVE UNKNOWN SEX VALUES
+#remove "U" values in age column assuming they mean unknown - confirm that this is how Jackson did null bootstrap analysis*
+
+sex_nonull_nounknown <- complaints_nonull_demographic |>
+  filter(susp_sex != "U")
+
+sex_nonull_nounknown
+nrow(sex_nonull_nounknown) #315,344
+
+
+
+#VISUALIZE (for all precincts before vs. after)
+ggplot(data=sex_nonull_nounknown, aes(x=time_period, fill=susp_sex)) +
+  geom_bar()
+```
+
+```{r}
+#FIND TOP 20 PRECINCTS WITH THE MOST COMPLAINTS FROM NO NULL DEMOGRAPHIC
+
+top_20_precincts <- complaints_nonull_demographic |>
+  count(precinct_crime, sort = TRUE) |>  
+  slice_max(n, n = 20)              
+
+top_20_precincts$precinct_crime
+
+
+#filter to keep only top 20 precincts after removing null from 3 demographics
+sex_nonull_nounknown_top20 <- sex_nonull_nounknown |>
+  filter(precinct_crime %in% top_20_precincts$precinct_crime)
+sex_nonull_nounknown_top20
+
+table(sex_nonull_nounknown_top20$precinct_crime)
+
+#VISUALIZE (for top 20 precincts before vs. after)
+ggplot(data=sex_nonull_nounknown_top20, aes(x=time_period, fill=susp_sex)) +
+  geom_bar()
+
+
+
+#CREATE COPY TO RENAME DATAFRAME FOR CLARITY
+sex_df <- sex_nonull_nounknown_top20
+nrow(sex_df) #143,930
+```
+
+```{r}
+#CHISQUARE TEST
+library(tidyverse)
+library(lubridate)
+
+#SEPARATE BY TIME PERIOD
+#separate data based on before and after patternizr
+before <- sex_df |>
+  filter(time_period == "before Patternizr")
+head(before)
+
+after <- sex_df |>
+  filter(time_period == "after Patternizr")
+head(after)
+
+#BEFORE PATTERNIZR
+#for each precinct, what is the average monthly number of male and female suspects before patternizr?
+(table(before$precinct_crime, before$susp_sex))
+
+#AFTER PATTERNIZR
+#for each precinct, what is the average monthly number of male and female suspects after patternizr?
+(table(after$precinct_crime, after$susp_sex))
+
+#table confirms that for t-test assumption of normality, we can proceed since the sample sizes are large enough to withstand any deviations in normality. don't need to check for variance sine welch's t-test is done below
+```
+
+```{r}
+#sex_df
+#top_20_precincts
+
+chisq_results <- tibble() #empty tibble to store results
+
+for (precinct in top_20_precincts$precinct_crime) {
+  #filter only this precinct, one of top 20
+  precinct_df <- sex_df |> filter(precinct_crime == precinct)
+
+  #create table that shows sex before and after patternizr for this precinct
+  precinct_table <- table(precinct_df$susp_sex, precinct_df$time_period)
+  print(precinct_table)
+  
+  #chisquare test - is the specific count before vs. after the same?
+  chi_result <- chisq.test(precinct_table)
+  print(chi_result)
+  
+  # Store results
+  chisq_results <- chisq_results |>
+    bind_rows(tibble(
+      precinct_crime = precinct,
+      statistic = as.numeric(chi_result$statistic),
+      p_value = chi_result$p.value,
+      df = chi_result$parameter
+    ))
+}
+
+chisq_results
+#write.csv(chisq_results, "sex_chisq_results.csv", row.names = FALSE)
+```
+

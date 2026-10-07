@@ -1,0 +1,283 @@
+
+```{r}
+# ============================================
+# Race-based monthly t-tests by precinct
+# Before vs After Patternizr
+# ============================================
+
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(lubridate)
+
+# --------------------------------------------
+# 1. Load and clean race data
+# --------------------------------------------
+
+data <- read.csv("../../../data/cleaning/null_demographics_removed.csv")
+
+# Remove UNKNOWN race
+data <- data[data$susp_race != "UNKNOWN", ]
+
+
+# Convert complaint_date to Date
+# If your dates look like "04/15/2022", use mdy()
+# If they look like "2022-04-15", use ymd() instead.
+#data$complaint_date <- mdy(data$complaint_date)
+data$complaint_date <- ymd(data$complaint_date)  # <-- use this instead if needed
+data
+```
+
+```{r}
+# --------------------------------------------
+# 2. Get the top 20 precincts
+# --------------------------------------------
+
+top_precincts_table <- data %>%
+  count(precinct_crime, sort = TRUE) %>%
+  slice_max(n, n = 20) %>%
+  arrange(precinct_crime)
+
+print(top_precincts_table)
+
+top_precincts <- top_precincts_table$precinct_crime
+
+# --------------------------------------------
+# 3. Filter to top precincts & prep for t-tests
+# --------------------------------------------
+
+df_tp_race <- data %>%
+  filter(precinct_crime %in% top_precincts) %>%
+  mutate(
+    time_period = factor(
+      time_period,
+      levels = c("before Patternizr", "after Patternizr")
+    )
+  )
+df_tp_race
+
+# Get list of precincts and race categories
+precincts   <- df_tp_race %>% distinct(precinct_crime) %>% pull()
+precincts
+
+race_levels <- df_tp_race %>% distinct(susp_race) %>% pull()
+race_levels
+```
+
+```{r}
+#check the assumptions of normality and equal variance
+
+# --------------------------------------------
+# 3b. Check Assumptions (Normality & Variance)
+# --------------------------------------------
+
+assumption_results <- tibble()
+
+for (p in precincts) {
+  for (race in race_levels) {
+    
+    # 1. PREPARE DATA (Same aggregation as your T-test loop)
+    df_p <- df_tp_race %>%
+      filter(precinct_crime == p,
+             susp_race == race)
+    
+    if (nrow(df_p) == 0) next
+    
+    # Create monthly counts
+    monthly_counts <- df_p %>%
+      mutate(month = floor_date(complaint_date, "month")) %>%
+      count(time_period, month) %>%
+      ungroup()
+    #print(monthly_counts)
+    
+    # Split into vectors for testing
+    counts_before <- monthly_counts %>% 
+      filter(time_period == "before Patternizr") %>% pull(n)
+    
+    counts_after <- monthly_counts %>% 
+      filter(time_period == "after Patternizr") %>% pull(n)
+    
+    # 2. RUN DIAGNOSTICS
+    # Initialize variables as NA
+    shapiro_before_p <- NA
+    shapiro_after_p  <- NA
+    var_test_p       <- NA
+    
+    # Check Normality (Requires n >= 3 and valid variance)
+    # If p < 0.05, Normality is VIOLATED
+    if (length(counts_before) >= 3 && var(counts_before) > 0) {
+      shapiro_before_p <- shapiro.test(counts_before)$p.value
+    }
+    
+    if (length(counts_after) >= 3 && var(counts_after) > 0) {
+      shapiro_after_p <- shapiro.test(counts_after)$p.value
+    }
+    
+    # Check Equal Variance (Requires data in both groups)
+    # If p < 0.05, Equal Variance is VIOLATED
+    if (length(counts_before) >= 2 && length(counts_after) >= 2 && 
+        var(counts_before) > 0 && var(counts_after) > 0) {
+      var_test_p <- var.test(counts_before, counts_after)$p.value
+    }
+    
+    # 3. STORE RESULTS
+    assumption_results <- assumption_results %>%
+      bind_rows(tibble(
+        precinct_crime = p,
+        susp_race      = race,
+        n_months_pre   = length(counts_before),
+        n_months_post  = length(counts_after),
+        normality_pre_p  = shapiro_before_p,
+        normality_post_p = shapiro_after_p,
+        equal_var_p      = var_test_p
+      ))
+  }
+}
+
+# --------------------------------------------
+# VIEW VIOLATIONS
+# --------------------------------------------
+
+# Identify groups where Normality is violated (p < 0.05)
+non_normal_groups <- assumption_results %>%
+  filter(normality_pre_p < 0.05 | normality_post_p < 0.05)
+
+# Identify groups where Equal Variance is violated (p < 0.05)
+unequal_variance_groups <- assumption_results %>%
+  filter(equal_var_p < 0.05)
+
+print(paste("Total tests run:", nrow(assumption_results)))
+print(paste("Groups violating normality:", nrow(non_normal_groups)))
+print(paste("Groups violating equal variance:", nrow(unequal_variance_groups)))
+
+# View the table
+assumption_results
+```
+Although normality was violated, we have enough "months" of data per precinct per race for MOST precinct/race specific datasets (ie monthly count of a given precinct, for a given race). However, there are a handful that do not have enough "months" of data to overcome this. For these specific races in these specific precincts, we should conduct a non-parametric alternative like the Wilcoxon rank test. For the sake of time, we will continue with the Welch's t-test which accounts for unequal variance.
+
+For many of the precinct and race specific datasets, we see that the equal variance assumptions was violated. We conducted a welch's t-test by default for all precincts based on these results.
+
+```{r}
+# --------------------------------------------
+# 4. Monthly t-tests for each precinct × race
+# --------------------------------------------
+
+race_ttests_by_precinct <- tibble()
+
+for (p in precincts) {
+  for (race in race_levels) {
+    
+    # Filter to precinct + race
+    df_p <- df_tp_race %>%
+      filter(precinct_crime == p,
+             susp_race == race)
+    
+    # If no rows, skip
+    #if (nrow(df_p) == 0) next
+    
+    # Build monthly counts of arrests
+    monthly_counts <- df_p %>%
+      mutate(month = floor_date(complaint_date, "month")) %>%
+      count(time_period, month)
+    #print(monthly_counts)
+    
+    if (nrow(monthly_counts) < 30) next
+    
+    # Need data in both time periods
+    #if (monthly_counts %>% count(time_period) %>% nrow() < 2) next
+    
+    # Need non-zero variance in both groups to run t-test
+    group_vars <- monthly_counts %>%
+      group_by(time_period) %>%
+      summarize(v = var(n), .groups = "drop")
+    
+    if (any(is.na(group_vars$v)) || any(group_vars$v == 0)) next
+    
+    # Run t-test: monthly counts before vs after
+    tt <- t.test(n ~ time_period, data = monthly_counts, var.equal=FALSE)
+    
+    # Make sure we map means correctly to "before" and "after"
+    ests <- tt$estimate
+    mean_before <- as.numeric(ests["before Patternizr"])
+    mean_after  <- as.numeric(ests["after Patternizr"])
+    
+    # Append results
+    race_ttests_by_precinct <- race_ttests_by_precinct %>%
+      bind_rows(tibble(
+        precinct_crime = p,
+        susp_race      = race,
+        mean_before    = mean_before,
+        mean_after     = mean_after,
+        diff_mean      = mean_after - mean_before,
+        statistic      = as.numeric(tt$statistic),
+        p_value        = tt$p.value,
+        conf_low       = tt$conf.int[1],
+        conf_high      = tt$conf.int[2],
+        n_months       = nrow(monthly_counts)
+      ))
+  }
+}
+```
+
+
+```{r}
+# View full results
+race_ttests_by_precinct
+
+# Save full results (all tests)
+#write.csv(
+#  race_ttests_by_precinct,
+#  "/Users/ishika/Desktop/MS/DSAN 5100/Final Project/T-tests/race_precinct_t-tests.csv",
+#  row.names = FALSE
+#)
+
+# 5. Significant results (p < 0.05)
+
+sig_race_ttests <- race_ttests_by_precinct %>%
+  filter(p_value < 0.05)
+
+sig_race_ttests
+
+sig_precincts_race_t <- sig_race_ttests %>%
+  distinct(precinct_crime) %>%
+  pull()
+
+sig_precincts_race_t
+
+#write.csv(
+#  sig_race_ttests,
+#  "/Users/ishika/Desktop/MS/DSAN 5100/Final Project/T-tests/race_precinct_t-tests_significant.csv",
+#  row.names = FALSE
+#)
+```
+
+```{r}
+significant_count <- sig_race_ttests |>
+  count(susp_race)
+significant_count
+
+library(ggplot2)
+
+# 2. Create the bar plot with fill by race
+sig_count_plot <- ggplot(significant_count, aes(x = susp_race, y = n, fill = susp_race)) + # <--- Changed here
+  geom_bar(stat = "identity") +
+  
+  # Add the count labels
+  geom_text(aes(label = n), vjust = -0.5, color = "black") +
+  
+  # Fix cut-off at the top
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  
+  # Titles and Labels
+  labs(title = "Count of Significant Change in Monthly Complaints after Patternizr",
+       x = "Suspect Race",
+       y = "Count",
+       fill = "Race") + # Legend title
+  
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+sig_count_plot
+
+ggsave("ttest_frequency.png", plot = sig_count_plot, width = 10, height = 6, units = "in", dpi = 300)
+```
+

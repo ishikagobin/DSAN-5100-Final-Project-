@@ -1,0 +1,494 @@
+---
+title: "EDA, T-Test, and Chi-Square Tests - Age"
+author: "Fareeza Ali"
+format:
+  html:
+    embed-resources: true
+    fig-width: 10
+    fig-height: 6
+toc: true
+---
+
+Conducted on different precincts than previously.
+
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(plotly)
+
+#read in and drop rows with unknown values in age column
+df <- read.csv("../../data/cleaning/null_demographics_removed.csv", stringsAsFactors = FALSE) |> 
+  filter(susp_age_group != "UNKNOWN") |>
+  mutate(complaint_date = as.Date(complaint_date))
+
+
+```
+
+We filtered to the 20 precincts with the most crime data reported in our cleaned dataset (including before and after Patternizr).
+
+Note: 77,272 UNKNOWN age values were removed \[discuss effect on the dataset\]
+
+```{r}
+#rank top20 precincts
+precinct_rank <- df |> count(precinct_crime, name = "n") |>
+    arrange(desc(n)) |>
+    mutate(rank = dense_rank(desc(n))
+    ) 
+
+top_precincts <- precinct_rank |> 
+    slice(1:20) |>
+    pull(precinct_crime
+    )
+
+top_precincts
+```
+
+```{r}
+# EDA: table and scatterplot
+age_table <- df |>
+  count(susp_age_group, precinct_crime, time_period, name = "n") |>
+  arrange(desc(n)
+  )
+
+age_table 
+
+age_wide <- age_table |>
+  filter(precinct_crime %in% top_precincts) |>
+  tidyr::pivot_wider(
+    names_from  = time_period,
+    values_from = n,
+    values_fill = 0
+  ) |>
+  rename(
+    before = `before Patternizr`,
+    after  = `after Patternizr`
+  )
+
+p <- ggplot(age_wide,
+       aes(x = before, y = after, color = susp_age_group,
+           text = paste(
+             "Precinct:", precinct_crime,
+             "<br>Age Group:", susp_age_group,
+             "<br>Before:", scales::comma(before),
+             "<br>After:", scales::comma(after)
+           ))) +
+  geom_point(alpha = 0.6, size = 3) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  labs(
+    title = "Arrest Counts by Age Group (All Precincts): Before vs After Patternizr",
+    x = "Before Patternizr (arrest count)",
+    y = "After Patternizr (arrest count)",
+    color = "Age Group"
+  ) +
+  theme_minimal(base_size = 14)
+
+# Convert to interactive plotly widget
+ggplotly(p, tooltip = "text")
+
+
+```
+
+The above table and scatterplot shows the breakout of each age group in each of the top 20 precincts, both before and after Patternizr. Dots above the line show more arrests in that age group for that precinct after Patternizr. Dots below the line show fewer arrests. The further from the line, the larger the shift was.
+
+We can see that almost all age groups had ore arrests after Patternizr than before. For age group/precinct combos with less arrests after Patternizr, the decrease is small compares to the increases. The largest overall increases seem to be in the 24-44 range, and the decreases seem to be concentrated within the \<18 and 18-24 age groups.
+
+```{r}
+# EDA: Heatmap
+df |> filter(precinct_crime %in% top_precincts) |>
+  count(susp_age_group, precinct_crime, time_period) |>
+  ggplot(aes(precinct_crime, susp_age_group, fill = n)) +
+  geom_tile() +
+  scale_fill_viridis_c(option = "C", trans = "log10", breaks = c(1,10,100,1000)) +
+  facet_wrap(vars(time_period)) +
+  labs(x = "Precinct crime", y = "Suspect age group", fill = "Count") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+```{r}
+# EDA: stackplots
+df |>
+  filter(precinct_crime %in% top_precincts) |>
+  count(time_period, precinct_crime, susp_age_group) |>
+  ggplot(aes(precinct_crime, n, fill = susp_age_group)) +
+  geom_col(position = "stack") +
+  facet_wrap(vars(time_period), scales = "free_y") +
+  labs(x = "Precinct crime", y = "Count", fill = "Suspect age") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+```{r}
+# EDA: Histograms
+df |>
+  filter(precinct_crime %in% top_precincts) |>
+  mutate(precinct_crime = factor(precinct_crime, levels = top_precincts)) |>
+  count(precinct_crime, susp_age_group, time_period) |>
+  ggplot(aes(x = susp_age_group, y = n, fill = time_period)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  facet_wrap(vars(precinct_crime), scales = "free_y", drop = FALSE) +
+  labs(x = "Suspect age group", y = "Count", fill = "Time period") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+This above plots display arrest counts by age group in the top precincts, comparing the periods before and after Patternizr. Each panel represents one precinct, and the bars show the number of arrests for each suspect age group, broken down by time period.
+
+Across nearly all precincts, the patterns of bar heights show large and systematic changes in the age distribution of arrests after Patternizr was introduced. Three major shifts are visible: - Arrests of younger suspects (\<18 and 18–24) generally decreased after Patternizr, suggesting Patternizr is associated with fewer arrests of minors and young adults across many top precincts. - Arrests of older suspects (25–44 and especially 45–64) increased after Patternizr, suggesting Patternizr is associated with substantial increases in arrests of adults aged 25–64. - The shift is not isolated and appears across nearly all top precincts, suggesting the effect is not specific to a precint but systematic, meaning Patternizr changes how arrests are distributed demographically, not just the volume of arrests in a few locations.
+
+## T-test
+
+```{r}
+library(lubridate)
+#t-tests for each precinct based on monthly averages
+
+# t tests for each precinct
+df_tp <- df |>
+  filter(precinct_crime %in% top_precincts) |>
+  mutate(time_period = factor(time_period,
+                              levels = c("before Patternizr", "after Patternizr")))
+
+# get age groups and precincts
+precincts   <- df_tp |> distinct(precinct_crime) |> pull()
+age_levels  <- df_tp |> distinct(susp_age_group) |> pull()
+
+# create empty tiblble for results
+age_ttests_by_precinct <- tibble()
+
+# nested loop -> precint then age
+for (p in precincts) {
+  for (age in age_levels) {
+
+    #filter to precinct + age group
+    df_p <- df_tp |> filter(precinct_crime == p, susp_age_group == age)
+
+    #create monthly data + count monthly arrests
+    monthly_counts <- df_p |> 
+      mutate(month = floor_date(complaint_date, "month")) |>
+      count(time_period, month)
+
+    # skip for groups with 0 counts 
+    if (monthly_counts |> count(time_period) |> nrow() < 2) next
+
+    #skip if either period has zero variance (constant monthly counts)
+    group_vars <- monthly_counts |> 
+      group_by(time_period) |> 
+      summarize(v = var(n), .groups = "drop")
+    if (any(is.na(group_vars$v)) || any(group_vars$v == 0)) next
+
+    #monthly count t-tests
+    tt <- t.test(n ~ time_period, data = monthly_counts)
+
+    #append results
+    age_ttests_by_precinct <- age_ttests_by_precinct |>
+      bind_rows(tibble(
+        precinct_crime = p,
+        susp_age_group = age,
+        mean_before    = tt$estimate[1],
+        mean_after     = tt$estimate[2],
+        diff_mean      = tt$estimate[2] - tt$estimate[1],
+        statistic      = tt$statistic,
+        p_value        = tt$p.value,
+        conf_low       = tt$conf.int[1],
+        conf_high      = tt$conf.int[2],
+        n_months       = nrow(monthly_counts)
+      ))
+  }
+}
+
+
+#check results
+age_ttests_by_precinct
+
+#write.csv(age_ttests_by_precinct, "age_precinct_t-tests_final.csv", row.names = FALSE)
+
+```
+
+## Z-test 
+
+H₀: The proportion of arrests in a given age group is the same before and after Patternizr. H₁: The proportion of arrests in a given age group is less than or greater after Patternizr than before.
+
+```{r}
+#precincts with statistically significant differences in age group arrests
+sig_results <- age_ttests_by_precinct |>
+  filter(p_value < 0.05)
+
+sig_results
+
+#unique precincts in dataset
+sig_precincts <- sig_results|> distinct(precinct_crime) |> pull()
+sig_precincts
+
+#write.csv(sig_results, "age_precinct_t-tests_significant.csv", row.names = FALSE)
+```
+
+Acrosss the statistically significant age group - precinct combinations (where p-value < 0.05), the introduction of Patternizr was associated with a substantial increase in monthly arrests. We see the strongest effects on the 25-44 age group, with individual precinct increases from ~ 15-18 additional arrests each month. Arrests in the 18-24 age group also increased significantly by ~ 5-7 additional arrests per month. The 45-64 age group had a moderate increase of ~4-5 additional arrests per month. Overall, the significant results show a consistent demographic shift after Patternizr: arrests of adults increased substantially across the top precincts.
+
+Precincts 40 and 75 indicate the strongest overall effect, with each having more than 40 additional arrests per month across age groups after the introduction of Patternizr. Precincts 41, 44, and 47 also had substantial increases. These precincts' effects are mostly driven by a rise in arrests of the 25-44 age group.
+
+```{r}
+# z tests for each precinct
+df_tp <- df |>
+  filter(precinct_crime %in% top_precincts) |>
+  mutate(time_period = factor(time_period,
+                              levels = c("before Patternizr", "after Patternizr")))
+
+# get age groups and precincts
+precincts   <- df_tp |> distinct(precinct_crime) |> pull()
+age_levels  <- df_tp |> distinct(susp_age_group) |> pull()
+
+# create empty tiblble for results
+age_ztests_by_precinct <- tibble()
+
+# nested loop -> precint then age
+for (p in precincts) {
+  df_p <- df_tp |> filter(precinct_crime == p)
+  for (age in age_levels) {
+    tmp <- df_p |>
+      mutate(ind = susp_age_group == age)
+
+    # counts
+    x_before <- sum(tmp$ind[tmp$time_period == "before Patternizr"])
+    x_after  <- sum(tmp$ind[tmp$time_period == "after Patternizr"])
+
+    n_before <- sum(tmp$time_period == "before Patternizr")
+    n_after  <- sum(tmp$time_period == "after Patternizr")
+
+    # proportions
+    p_before <- x_before / n_before
+    p_after  <- x_after  / n_after
+
+    # pooled proportion
+    p_pool <- (x_before + x_after) / (n_before + n_after)
+
+    # standard error
+    se <- sqrt(p_pool * (1 - p_pool) * (1/n_before + 1/n_after))
+
+    # z statistic
+    z_stat <- (p_after - p_before) / se
+
+    # two-sided p-value
+    p_val <- 2 * (1 - pnorm(abs(z_stat)))
+    
+    # append results
+    age_ztests_by_precinct <- age_ztests_by_precinct |>
+      bind_rows(tibble(
+        precinct_crime = p,
+        susp_age_group = age,
+        estimate_diff  = p_after - p_before,
+        statistic      = z_stat,
+        p_value        = p_val,
+        n_before       = n_before,
+        n_after        = n_after
+      ))
+
+  }
+}
+
+#check results
+age_ztests_by_precinct
+
+write.csv(age_ztests_by_precinct, "age_precinct_z-tests_final.csv", row.names = FALSE)
+```
+
+```{r}
+#precincts with statistically significant differences in age group arrests
+sig_results_z <- age_ztests_by_precinct |>
+  filter(p_value < 0.05)
+
+sig_results_z
+
+#unique precincts in dataset
+sig_precincts_z <- sig_results_z|> distinct(precinct_crime) |> pull()
+sig_precincts_z
+
+#write.csv(sig_results_z, "age_precinct_z-tests_significant.csv", row.names = FALSE)
+```
+## Chi Square test
+
+```{r}
+#chi square test - is the distribution of one categorical variable different across levels of another categorical variable?
+#is the count of age group level different depending on the time period?
+
+#test 1: did age distribution change time_period ~ sus_age_group
+df_tp_cs <- df |>
+  filter(precinct_crime %in% top_precincts)
+
+precincts[1] 
+head(df_tp_cs)
+
+chi_results <- tibble()
+
+for (p in precincts) {
+  # Subset to this precinct
+  df_p <- df_tp_cs |> filter(precinct_crime == p)
+
+  # Create contingency table: age group by before/after
+  tab <- table(df_p$susp_age_group, df_p$time_period)
+  print(tab)
+  
+  # Run chi-square test
+  chi <- chisq.test(tab)
+  print(chi)
+  
+  # Store results
+  chi_results <- chi_results |>
+    bind_rows(tibble(
+      precinct_crime = p,
+      statistic = as.numeric(chi$statistic),
+      p_value = chi$p.value,
+      df = chi$parameter
+    ))
+}
+
+chi_results
+#write.csv(chi_results, "age_precinct_chi_results.csv", row.names = FALSE)
+
+```
+
+```{r}
+#precincts with statistically significant differences chi results
+sig_chi_results <- chi_results |>
+  filter(p_value < 0.05)
+
+sig_chi_results
+
+#unique precincts in dataset
+sig_chi_results_precincts  <- sig_chi_results |> distinct(precinct_crime) |> pull()
+sig_chi_results_precincts
+
+#write.csv(sig_chi_results_precincts, "age_precinct_chi_result_significant.csv", row.names = FALSE)
+```
+# RESUME
+
+
+```{r}
+# Make sure df_tp is already filtered to top precincts and before/after
+df_tp_cs <- df |>
+  filter(precinct_crime %in% top_precincts)
+
+posthoc_results <- tibble()
+
+for (p in precincts[1]) {
+  
+  df_p <- df_tp_cs |> filter(precinct_crime == p)
+  print(df_p)
+  
+  # Build age × time table
+  tab <- table(df_p$susp_age_group, df_p$time_period)
+  print(tab)
+  
+  # Chi-square test
+  chi <- chisq.test(tab)
+  print(chi)
+  
+  # Standardized residuals matrix
+  resid_mat <- chi$stdres
+  
+  # Convert matrix → tidy tibble
+  resid_df <- as.data.frame(as.table(resid_mat)) |>
+    as_tibble() |>
+    rename(
+      susp_age_group = Var1,
+      time_period    = Var2,
+      std_residual   = Freq
+    ) |>
+    mutate(
+      precinct_crime = p,
+      chi_statistic  = as.numeric(chi$statistic),
+      p_value        = chi$p.value
+    )
+  
+  # Append
+  posthoc_results <- posthoc_results |> bind_rows(resid_df)
+}
+
+posthoc_results
+
+#write.csv(posthoc_results, "chi_posthoc_results.csv", row.names = FALSE)
+```
+
+
+
+
+```{r}
+# Create wide-format before/after table
+shift_results <- posthoc_results |>
+  select(precinct_crime, susp_age_group, time_period, std_residual) |>
+  mutate(time_period = ifelse(time_period == "before Patternizr", "before", "after")) |>
+  tidyr::pivot_wider(
+    names_from = time_period,
+    values_from = std_residual
+  ) |>
+  mutate(
+    shift = after - before   # positive = more overrepresented after
+  )
+ 
+shift_results |> filter(shift > 2)
+
+shift_results |> filter(shift < -2)
+
+shift_results |> arrange(desc(abs(shift))) |> head(20)
+
+
+#visualize
+library(ggplot2)
+
+ggplot(shift_results,
+       aes(x = "Before", y = before,
+           xend = "After", yend = after,
+           group = susp_age_group,
+           color = susp_age_group)) +
+  geom_segment(size = 1.1, alpha = 0.8) +
+  geom_point(size = 3, aes(x = "Before", y = before)) +
+  geom_point(size = 3, aes(x = "After",  y = after)) +
+  facet_wrap(~ precinct_crime, scales = "free_y") +
+  labs(
+    title = "Standardized Residual Shifts: Before vs After Patternizr",
+    x = "",
+    y = "Standardized Residual",
+    color = "Age Group"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.spacing = unit(1, "lines"),
+    axis.text.x = element_text(face = "bold")
+  )
+```
+
+```{r}
+```
+
+```{r}
+```
+
+```{r}
+```
+
+```{r}
+```
+
+```{r}
+```
+
+```{r}
+```
+
+```{r}
+```
+
+```{r}
+```
+
+```{r}
+```
+
+```{r}
+```
+
+```{r}
+```
+
+```{r}
+```
+
+```{r}
+```

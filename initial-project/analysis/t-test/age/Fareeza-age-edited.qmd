@@ -1,0 +1,315 @@
+---
+title: "EDA and T-Test - Age"
+format:
+  html:
+    fig-width: 10
+    fig-height: 6
+
+---
+```{r}
+library(tidyverse)
+
+#read in and drop rows with unknown values in age column
+df <- read.csv("null_demographics_removed.csv", stringsAsFactors = FALSE) |> filter(susp_age_group != "UNKNOWN")
+
+unknown_counts <- sapply(df, function(col) sum(col == "UNKNOWN", na.rm = TRUE))
+print(unknown_counts)
+
+df
+```
+
+```{r}
+#rank top20 precincts
+precinct_rank <- df |> count(precinct_crime, name = "n") |>
+    arrange(desc(n)) |>
+    mutate(rank = dense_rank(desc(n))
+    ) 
+precinct_rank
+
+top_precincts <- precinct_rank |> 
+    slice(1:20) |>
+    pull(precinct_crime
+    )
+
+top_precincts
+```
+
+```{r}
+#table of age vs precint vs time(before or after patternizer)
+
+age_table <- df |>
+  count(susp_age_group, precinct_crime, time_period, name = "n") |>
+  arrange(desc(n)
+  )
+
+age_table 
+```
+
+```{r}
+#plot 1
+df |> filter(precinct_crime %in% top_precincts) |>
+  count(susp_age_group, precinct_crime, time_period) |>
+  ggplot(aes(precinct_crime, susp_age_group, fill = n)) +
+  geom_tile() +
+  scale_fill_viridis_c(option = "C", trans = "log10", breaks = c(1,10,100,1000)) +
+  facet_wrap(vars(time_period)) +
+  labs(x = "Precinct crime", y = "Suspect age group", fill = "Count") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+```
+
+```{r}
+#plot 2
+
+df |>
+  filter(precinct_crime %in% top_precincts) |>
+  count(time_period, precinct_crime, susp_age_group) |>
+  ggplot(aes(precinct_crime, n, fill = susp_age_group)) +
+  geom_col(position = "stack") +
+  facet_wrap(vars(time_period), scales = "free_y") +
+  labs(x = "Precinct crime", y = "Count", fill = "Suspect age") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+```
+
+```{r}
+# df |>
+#   filter(precinct_crime %in% top_precincts) |>
+#   mutate(precinct_crime = factor(precinct_crime, levels = top_precincts)) |>
+#   count(precinct_crime, susp_age_group, time_period) |>
+#   ggplot(aes(x = susp_age_group, y = n, fill = time_period)) +
+#   geom_col(position = "stack") +
+#   facet_wrap(vars(precinct_crime), scales = "free_y", drop = FALSE) +
+#   labs(x = "Suspect age group", y = "Count", fill = "Time period") +
+#   theme(axis.text.x = element_text(angle = 45, hjust = 1))
+#plot 3
+df |>
+  filter(precinct_crime %in% top_precincts) |>
+  mutate(precinct_crime = factor(precinct_crime, levels = top_precincts)) |>
+  count(precinct_crime, susp_age_group, time_period) |>
+  ggplot(aes(x = susp_age_group, y = n, fill = time_period)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  facet_wrap(vars(precinct_crime), scales = "free_y", drop = FALSE) +
+  labs(x = "Suspect age group", y = "Count", fill = "Time period") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+```{r}
+#plot 4
+df |>
+  filter(precinct_crime %in% top_precincts) |>
+  count(time_period, precinct_crime, susp_age_group) |>
+  ggplot(aes(x = precinct_crime, y = n, fill = susp_age_group)) +
+  geom_col(position = "stack") +
+  facet_wrap(vars(time_period), scales = "free_y") +
+  labs(x = "Precinct crime", y = "Count", fill = "Suspect age group") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+
+```{r}
+library(broom)
+
+df_tp <- df |>
+  filter(precinct_crime %in% top_precincts,
+         time_period %in% c("before Patternizr", "after Patternizr")) |>
+  mutate(time_period = factor(time_period,
+                              levels = c("before Patternizr", "after Patternizr")))
+df_tp #dataframe with top 20 precints only, no nulls or unknowns for age group column
+
+age_levels <- df_tp |> distinct(susp_age_group) |> pull()
+age_levels
+```
+
+```{r}
+
+# A function that returns a data frame
+create_df <- function(x) {
+  tibble(value = x, squared = x^2, minus_2 = x - 2)
+}
+
+# Apply the function to a vector and row-bind the results
+result_df <- map_dfr(1:3, create_df)
+print(result_df)
+
+
+result_df <- sapply(1:3, create_df)
+print(result_df)
+```
+
+```{r}
+
+age_function <- function(age_group){
+  #create a temporary dataframe that contains a copy of the dataframe, but with a new column that will help us process only the age group we're interested in for one loop
+  #effectively subsetting the dataframe into only this age group of interest
+  tmp <- df_tp |> mutate(indicator = susp_age_group == age_group) #create a column that indicates whether the row has the age group we're interested in
+  print(tmp)
+  
+  #conduct a t-test for that age-group against the time period
+  #ie for a given age group, is their proportion of 
+  print(as.numeric(tmp$indicator)) #change the boolean values to 1/0 values
+  
+  tt  <- t.test(as.numeric(indicator) ~ time_period, #as.numeric(indicator) tells us the average of people in that age group who did commit crime. compare this before vs. after
+                data = tmp,
+                alternative = "greater")  # after > before
+  
+  broom::tidy(tt) |>
+    mutate(
+      susp_age_group = age_group,
+      n_before = sum(tmp$time_period == "before Patternizr"),
+      n_after  = sum(tmp$time_period == "after Patternizr")
+    )
+}
+
+map_dfr(c("25-44"), age_function)
+
+#age_ttests_top <- map_dfr(age_levels, age_function)
+#age_ttests_top
+
+
+```
+
+```{r}
+### ORIGINAL
+age_ttests_top <- map_dfr(age_levels, function(ag) {
+  tmp <- df_tp |> mutate(ind = susp_age_group == ag)
+  tt  <- t.test(as.numeric(ind) ~ time_period,
+                data = tmp,
+                alternative = "greater")  # after > before
+  broom::tidy(tt) |>
+    mutate(
+      susp_age_group = ag,
+      n_before = sum(tmp$time_period == "before Patternizr"),
+      n_after  = sum(tmp$time_period == "after Patternizr")
+    )
+})
+
+age_ttests_top
+```
+
+
+write out methodology and why filtered data the way i did.
+
+```{r}
+library(broom)
+
+df_tp <- df |>
+  filter(precinct_crime %in% top_precincts,
+         time_period %in% c("before Patternizr", "after Patternizr")) |>
+  mutate(time_period = factor(time_period,
+                              levels = c("after Patternizr", "before Patternizr")))
+
+age_levels <- df_tp |> distinct(susp_age_group) |> pull()
+
+age_ttests_by_precinct <- df_tp |>
+  group_by(precinct_crime) |>
+  group_modify(~ map_dfr(age_levels, function(ag) {
+    tmp <- .x |> mutate(ind = susp_age_group == ag)
+    tt  <- t.test(as.numeric(ind) ~ time_period, data = tmp, alternative = "greater")
+    broom::tidy(tt) |>
+      mutate(
+        susp_age_group = ag,
+        n_after  = sum(tmp$time_period == "after Patternizr"),
+        n_before = sum(tmp$time_period == "before Patternizr")
+      )
+  })) |>
+  ungroup()
+
+age_ttests_by_precinct
+age_ttests_by_precinct |> select(precinct_crime, susp_age_group, estimate, p.value)
+
+write.csv(age_ttests_by_precinct, "age_precinct_t-tests.csv", row.names = FALSE)
+```
+
+
+
+```{r}
+### RE-WRITTEN BY LLM WHILE TRYING TO UNDERSTAND FOR SEX DEMOGRAPHIC
+
+
+# --- STEP 1: PREPARE DATA ---
+# Filter for Top Precincts and valid Time Periods
+df_tp <- df |>
+  filter(precinct_crime %in% top_precincts,
+         time_period %in% c("before Patternizr", "after Patternizr"))
+df_tp #creates a dataframe with only top 20 precincts and no null/no unknown values for age group
+
+# Get the list of unique age groups to loop through
+age_levels <- unique(df_tp$susp_age_group)
+age_levels #creates list of all unique age group levels
+
+# Create a list to store our results
+results_list <- list()
+
+# --- STEP 2: THE EXPLICIT LOOP ---
+
+for (current_age_group in age_levels) {
+  
+  # A. MANUALLY SPLIT THE DATAFRAME
+  # Create two completely separate tables
+  before_df <- filter(df_tp, time_period == "before Patternizr")
+  after_df  <- filter(df_tp, time_period == "after Patternizr")
+  
+  # B. CREATE A VECTOR CONTAINING BINARY INDICATOR OF IF ROW IS IN AGE GROUP OF INTEREST (THE 0s and 1s)
+  # For the "Before" pile: 1 if it matches the current age group, 0 if not
+  age_interest_before <- as.numeric(before_df$susp_age_group == current_age_group)
+  #before patternizr, WHICH people in this age group committed crime?
+  
+  # For the "After" pile: 1 if it matches the current age group, 0 if not
+  age_interest_after  <- as.numeric(after_df$susp_age_group == current_age_group)
+  #after patternizr, WHICH people in this age group committed crime?
+  
+  # --- CONCEPT CHECK: PROVING MEAN = PROPORTION ---
+  # If vec_before is c(1, 1, 0, 0), the mean is 0.5 (50%)
+  # This calculates the actual % of crimes committed by this age group
+  prop_age_interest_before <- mean(age_interest_before) 
+  #before patternizr, what proportion of people in this age group committed crime relative to people not in this age group?
+  print(prop_age_interest_before)
+  prop_age_interest_after  <- mean(age_interest_after)
+  #after patternizr, what proportion of people in this age group comitted crime relative to people not in this age group?
+  print(prop_age_interest_after)
+  
+  # C. RUN THE T-TEST ON THE TWO VECTORS
+  # We compare the "After" vector against the "Before" vector
+  tt <- t.test(age_interest_after, age_interest_before, alternative = "greater")
+  print(tt)
+  
+  # D. SAVE RESULTS
+  results_list[[current_age_group]] <- data.frame(
+    age_group      = current_age_group,
+    # These 'estimates' from the t-test will match the means we calculated above!
+    prop_before    = tt$estimate[2], 
+    prop_after     = tt$estimate[1],
+    p_value        = tt$p.value,
+    n_before       = length(vec_before), # Total crimes in 'before' period
+    n_after        = length(vec_after)   # Total crimes in 'after' period
+  )
+}
+print(results_list)
+
+# --- STEP 3: COMBINE RESULTS ---
+final_results <- bind_rows(results_list)
+
+# View the table
+print(final_results)
+```
+
+
+
+```{r}
+df1 <- data.frame(id = 1:3, name = c("Alice", "Bob", "Charlie"))
+df1
+df2 <- data.frame(id = 4:5, age = c(25, 30))
+df2
+df3 <- data.frame(name = c("David", "Eve"), city = c("NY", "LA"))
+df3
+
+# Combining df1 and df2
+combined_df_1_2 <- bind_rows(df1, df2)
+combined_df_1_2
+
+# Combining all three with an ID column
+combined_all_with_id <- bind_rows(df1, df2, df3, .id = "source_df")
+combined_all_with_id
+```

@@ -1,0 +1,193 @@
+---
+title: "5100 Final Project T-Test"
+author: "Dana Kim"
+format: 
+  html:
+    embed-resources: true
+toc: true
+---
+
+# CLEANING THE DATA
+
+## T-test after removing null values for sex demographic
+
+Reading in the data with only relevant, renamed columns and deleting all columns that have null values for any of the three demographic categories (race, sex, age).
+
+```{r}
+library(tidyverse)
+complaints_nonull_demographic <- read_csv("../../../data/cleaning/null_demographics_removed.csv")
+complaints_nonull_demographic
+```
+
+After removing all null values in any of the three demographic categories (age, sex, race), we individually removed all unknown values from our individual demographic categories. For this analysis, I removed the "U" values from the sex category (assuming that "U" stands for unknown).
+
+```{r}
+#CLEAN TO REMOVE UNKNOWN SEX VALUES
+#remove "U" values in age column assuming they mean unknown - confirm that this is how Jackson did null bootstrap analysis*
+
+sex_nonull_nounknown <- complaints_nonull_demographic |>
+  filter(susp_sex != "U")
+
+sex_nonull_nounknown
+nrow(sex_nonull_nounknown) #315,344
+
+
+
+#VISUALIZE (for all precincts before vs. after)
+ggplot(data=sex_nonull_nounknown, aes(x=time_period, fill=susp_sex)) +
+  geom_bar()
+```
+
+We then find the top 20 precincts with the most complaints after removing the nulls from any demographic category (race, sex, gender). This keeps the top 20 precincts among sex, race, and gender the same. These are the precincts we will run our analyses on.
+
+```{r}
+#FIND TOP 20 PRECINCTS WITH THE MOST COMPLAINTS FROM NO NULL DEMOGRAPHIC
+
+top_20_precincts <- complaints_nonull_demographic |>
+  count(precinct_crime, sort = TRUE) |>  
+  slice_max(n, n = 20)              
+
+top_20_precincts$precinct_crime
+
+
+#filter to keep only top 20 precincts after removing null from 3 demographics
+sex_nonull_nounknown_top20 <- sex_nonull_nounknown |>
+  filter(precinct_crime %in% top_20_precincts$precinct_crime)
+sex_nonull_nounknown_top20
+
+table(sex_nonull_nounknown_top20$precinct_crime)
+
+#VISUALIZE (for top 20 precincts before vs. after)
+ggplot(data=sex_nonull_nounknown_top20, aes(x=time_period, fill=susp_sex)) +
+  geom_bar()
+
+
+
+#CREATE COPY TO RENAME DATAFRAME FOR CLARITY
+sex_df <- sex_nonull_nounknown_top20
+nrow(sex_df) #143,930
+```
+
+Now we run the t-test. First, a little bit more exploratory data analysis to see what the sample sizes are.
+
+```{r}
+#T-TEST
+#for each precinct, is the difference in suspect sex before vs. after patternizr significant?
+library(tidyverse)
+library(lubridate)
+
+#SEPARATE BY TIME PERIOD
+#separate data based on before and after patternizr
+before <- sex_df |>
+  filter(time_period == "before Patternizr")
+head(before)
+
+after <- sex_df |>
+  filter(time_period == "after Patternizr")
+head(after)
+
+#BEFORE PATTERNIZR
+#for each precinct, what is the average monthly number of male and female suspects before patternizr?
+(table(before$precinct_crime, before$susp_sex))
+
+#AFTER PATTERNIZR
+#for each precinct, what is the average monthly number of male and female suspects after patternizr?
+(table(after$precinct_crime, after$susp_sex))
+
+#table confirms that for t-test assumption of normality, we can proceed since the sample sizes are large enough to withstand any deviations in normality. don't need to check for variance sine welch's t-test is done below
+```
+
+
+# T-test
+
+## T-test to see if monthly average of each sex increased before vs after Patternizr in each individual precinct
+
+In a given precinct, did the monthly average number of complaints for males increase after Patternizr? What about for females in that precinct?
+
+```{r}
+#this is a test to see how you would do the calculations for every single precinct and sex
+
+
+#subset the data to find only males in only precinct 40
+precinct_40_males <- sex_df |>
+  filter(precinct_crime == 40, susp_sex == "M")
+head(precinct_40_males)
+
+#calculate how many arrests happened each month in precinct 40 for males
+p40_monthly_counts <- precinct_40_males |>
+  mutate(month = floor_date(complaint_date, "month")) |>
+  count(time_period, month)
+print(p40_monthly_counts)
+
+t.test(n ~ time_period, data = p40_monthly_counts)
+```
+From the above test, we can say that in precinct 40 there is a statistically significant difference in the monthly average of male suspects after Patternizr compared to before Patternizr.
+
+```{r}
+library(lubridate)
+
+#to iterate through all precincts and all sexes (M, F)
+unique_groups <- sex_df |>
+  distinct(precinct_crime, susp_sex)
+unique_groups
+
+results_list <- list() #empty vector to store results
+
+#loop to perform the above action for every single precinct
+for(i in 1:nrow(unique_groups)) {
+  
+  #current_precinct and current_sex for this iteration
+  curr_precinct <- unique_groups$precinct_crime[i]
+  curr_sex      <- unique_groups$susp_sex[i]
+  
+  #filter the data to include only current precinct and current sex data
+  current_data <- sex_df |>
+    filter(precinct_crime == curr_precinct, susp_sex == curr_sex)
+  
+  #create new dataframe with counts
+  current_counts <- current_data |>
+    mutate(month = floor_date(complaint_date, "month")) |>
+    count(time_period, month)
+  #print(current_counts)
+  
+  #t-test for this precinct and sex
+  test_output <- t.test(n ~ time_period, data = current_counts)
+  #print(test_output)
+  #print(test_output$estimate[1])
+  #print(test_output$estimate[2])
+  
+  #store results
+  results_list[[i]] <- tibble(
+    precinct = curr_precinct,
+    sex = curr_sex,
+    average_monthly_afterP = test_output$estimate[1],
+    average_monthly_beforeP = test_output$estimate[2],
+    diff_mean = test_output$estimate[1] - test_output$estimate[2],
+    statistic = test_output$statistic,
+    p_value = test_output$p.value,
+    conf_low = test_output$conf.int[1],
+    conf_high = test_output$conf.int[2]
+    )
+  
+  #print(results_list[[i]])
+}
+
+#combine all results in list into a dataframe
+final_results <- bind_rows(results_list)
+final_results
+
+#export as csv
+#write_csv(final_results, "sex_t_test.csv")
+```
+```{r}
+#significant results only
+significant_precincts <- final_results |>
+  filter(p_value < 0.05)
+significant_precincts
+```
+# T-test Results
+
+INSERT INTERPRETATIONS OF RESULTS HERE.
+
+Overall for each of the top 20 precincts with the most complaints in this time frame, every single one showed a statistically significant increase in the average monthly number of male or female suspects after Patternizr. This suggests that the use of Patternizr increased the average monthly complanints for each sex at a statistically significant rate than before the use of AI-powered policing systems. 
+

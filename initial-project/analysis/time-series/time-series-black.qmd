@@ -1,0 +1,511 @@
+---
+title: "Time Series for Race - Black"
+format:
+    html:
+        embed-resources: true
+---
+
+We will run a time-series analysis and find the ARIMA model that best fits the data to then forecast our two variables of interest. Again our variables are as follows:
+
+X: Reporting month Y1: Total number of complaints (in given month) Y2: Average time it takes for a crime to be reported from when it happened (in a given month)
+
+The dataframe loaded into this file has only data for a single racial group. These 2 analyses will be repeated for all 6 racial groups found in the data. The has already been cleaned and prepared for these analyses.
+
+Overview of requirements:
+
+-   Use at least two visualization tools (Plotly required for one figure; others can include Tableau, Seaborn, ggplot, etc.) to tell a clear time-based story and highlight important real-world events that explain shifts in your data.
+
+-   Begin with full EDA by plotting the time series and describing observable patterns such as trend, seasonality, variability, and any unusual behavior you notice from the plot.
+
+-   Perform a classical decomposition and summarize what the trend, seasonal, and remainder components tell you about the structure of your data.
+
+-   Create lag plots and ACF plot to briefly explain what these patterns tell you about relationships(seasonality?, high correlation?..etc) in the data and whether the series appears stationary.
+
+-   Check stationarity with the Augmented Dickey–Fuller test, compare with the ACF plot.
+
+-   Log Transformation: apply transformations only if needed until the series becomes less variable, and show the differenced plot for the before and after log transformation.
+
+-   Plot ACF/PACF : Identify possible ARIMA orders (p, d, q) from your differenced data, fit several candidate models manually, and choose the best models based on AIC or BIC. Show the table.
+
+-   Run auto.arima(), compare its chosen model with your manually selected ones, and use diagnostic plots to determine which model fits best.
+
+-   Perform full model diagnostics on at least two ARIMA models using sarima() (or an equivalent tool) and briefly interpret all diagnostic outputs, including the residual plot, residual ACF, residual distribution, Q–Q plot, and the t-table for parameter significance.
+
+-   Compare your best ARIMA model to benchmark methods using the plotting the forecasts and other error measurements such as MAE and MSE to decide whether your model outperforms simple forecasting approaches.
+
+-   Produce a final forecast plot for your best model and write a short, clear interpretation of what the forecast indicates about future behavior.
+
+```{r}
+library(tidyverse)
+#LOAD THE DATA
+black_df <- read_csv("cleaning/black.csv")
+black_df
+
+```
+
+## Average Reporting Delay (in a given month)
+
+### Data Visualization
+
+-   Use at least two visualization tools (Plotly required for one figure; others can include Tableau, Seaborn, ggplot, etc.) to tell a clear time-based story and highlight important real-world events that explain shifts in your data.
+
+```{r}
+library(ggplot2)
+static_plot <- ggplot(black_df, aes(x = report_month, y = avg_report_delay_days)) +
+  geom_line() +
+  geom_point() +
+  labs(
+    title = "Total Complaints Involving Black Suspects",
+    x = "Month",
+    y = "Total Complaints of Black Suspects"
+  ) +
+  theme_minimal()
+#ggsave("black-total-post-2020.png", plot = static_plot, width = 10, height = 6, units = "in", dpi = 300)
+
+
+library(plotly)
+interactive_plot <- ggplot(black_df, aes(x=report_month)) +
+  geom_line(aes(y=avg_report_delay_days))+
+ggtitle("Average Reporting Delay for Crimes Involving Black Suspects")
+
+
+ggplotly(interactive_plot)
+
+
+```
+
+### EDA and Decomposition
+
+-   Begin with full EDA by plotting the time series and describing observable patterns such as trend, seasonality, variability, and any unusual behavior you notice from the plot.
+
+-   Perform a classical decomposition and summarize what the trend, seasonal, and remainder components tell you about the structure of your data.
+
+    The data does not necessarily seem to have a clear upward or downwards trend. In fact, it seems to change consistently - which may suggest stationarity. The data seems to have an overall consistent pattern of increasing and decreasing by similar amounts at relatively equal intervals of time. There is a relatively large variability ranging from 0 to 50 days of average reporting delays per month. There is a clear large spike in September 2007 and another smaller spike around March 2019. From the results of the decomposition, we will be able to detect these patterns more clearly.
+
+```{r}
+#CONVERT TO TS OBJECT
+black_ts <- ts(black_df$avg_report_delay_days, frequency = 12, start = c(2006, 01))
+head(black_ts)
+
+#DECOMPOSITION
+library(ggfortify)
+autoplot(decompose(black_ts,"multiplicative"))
+```
+
+The warning tells us that we are missing the first and last 12 months of data from the entire time series (1 year missing from beginning, 1 year missing from end). This is mathmematically necessary for the time series to be decomposed using classical decomposition, according to LLM\*.
+
+From the trend component, we can see that there is a varying trend that is difficult to call increasing or decreasing over time. There was a strong spike in activity in early years (September 2007) and a weak spike in activity in more recent years (March 2019). There seems to be a seasonal trend in the data as captured by the seasonal component, which shows a consistent pattern of increase and decrease. Finally, the remainder component seems to have a few spikes but is mostly random. We can see that the remainder component also looks very similar to the original data, which may suggest that the original time series data may be mostly random to begin with.
+
+In the real-world, this suggests that the average reporting delays of complaints involving Black suspects may not have a clear general trend but seems to contain some sort of seasonality.
+
+-   LLM explanation of the warning message: "The warning indicates that the decomposition model produced **24 missing values** in the plotting data. This occurs because the classical decomposition method uses a 12-month centered moving average to estimate the trend, which makes it mathematically impossible to calculate values for the **first 6 months and last 6 months** of the time series. These 12 missing months appear as gaps in both the 'Trend' and 'Remainder' components of the plot, resulting in 24 total missing data points."
+
+## Stationarity
+
+-   Create lag plots and ACF plot to briefly explain what these patterns tell you about relationships(seasonality?, high correlation?..etc) in the data and whether the series appears stationary.
+
+-   Check stationarity with the Augmented Dickey–Fuller test, compare with the ACF plot.
+
+-   Log Transformation: apply transformations only if needed until the series becomes less variable, and show the differenced plot for the before and after log transformation.
+
+### Lag Plots
+
+```{r}
+library(forecast)
+#LAG PLOT FOR ONE LAG
+gglagplot(black_ts, do.lines=FALSE, lags=1) +
+  xlab("Lag 1")+ylab("Yt") +
+  ggtitle("Lag Plot for Average Reporting Delay For Complaints Involving Black Suspects")
+
+#LAG PLOT FOR MULTIPLE LAGS
+gglagplot(black_ts, do.lines=FALSE) +
+  xlab("Lags")+ylab("Yt") +
+  ggtitle("Lag Plot for Average Reporting Delay For Complaints Involving Black Suspects") +
+  theme(axis.text.x=element_text(angle=45, hjust=1))
+```
+
+> When looking at the lag plots, there does not seem to be strong auto-correlation in this time series. However, the lag plots suggest there could be a weak auto-correlation as the data points are bunched around the bottom left corner of the diagonal line in the graphs.
+>
+> In the real-world this suggests that there may only be weak correlation between the monthly average reporting delays of Black suspects.
+
+### ACF and PACF Plots
+
+```{r}
+ggAcf(black_ts, 200, main="ACF Plot of Average Reporting Delay For Complaints Involving Black Suspects")
+
+ggPacf(black_ts, 200, main="PACF Plot of Average Reporting Delay For Complaints Involving Black Suspects")
+```
+
+The ACF plot shows whether there is auto-correlation between original data point and its subsequent lags with the influence of intermediate lags. The plot shows us that there is only auto-correlation between the first few lags of the data points. This means that the average reporting delay for complaints involving Black suspects does not typically depend on the previous month's value, with the exception of "today's" average reporting delay depending on last month and the previous month. Regarding stationarity, we can see that the auto-correlation between lags drops to 0 quickly, which indicates that the time series data does change at a consistent rate (suggesting that it is stationary).
+
+The PACF plot shows similar information to the ACF plot except that it tells us whether each subsequent lag correlates with the original data point without the influence of the intermediate data points. We can see that the second month's data is correlated with the previous month and the third month also correlates with the first month. However, for all other months there is no autocorrelation between the lags (without the influence of intermediate lags).
+
+### ADF Test
+
+```{r}
+tseries::adf.test(black_ts)
+```
+
+When trying to determine whether the time series is stationary, we looked used the ADF test whose null hypothesis is that the time series is NOT stationary. At a 5% significance level, the results of the ADF test (p \< 0.01) gives us enough evidence to reject the null hypothesis, suggesting that the time series data is stationary. This aligns with the conclusion from interpreting the ACF plot.
+
+**Stationarity Conclusion**
+
+Although the ADF test and ACF plot suggests that the data is stationary, we can see from the general trend in the decomposition results that the mean of the y values changes over time. Thus, we will treat this as a non-stationary time series and apply diffrencing to make it stationary. We will also see later in the parameter tuning whether this was a reasonable conclusion depending on if the ARIMA model does worse with or without diffrencing (d =0, d != 0).
+
+### Log Transformation
+
+We do not need to apply the log transformation here since the overall variance of the time series is not too large.
+
+### Differencing the Time Series
+
+```{r}
+#DIFFERENCE THE DATA
+diff1_black <- diff(black_ts)
+
+#plot data that was differenced once
+diff1 <- ggplot() +
+  geom_line(aes(x = time(diff1_black), y = diff1_black), color = "blue") +
+  labs(title = "1st Order Differencing of Monthly Average Reporting Delay of Black Suspects",
+       x = "Report Month",
+       y = "Differenced Average Reporting Delay of Black Suspects") +
+  theme_minimal()
+diff1
+
+#ACF AND PACF PLOTS
+ggAcf(diff1_black, 200, main="ACF Plot of First Order Differenced Reporting Delay of Black Suspects")
+
+ggPacf(diff1_black, 200, main="PACF Plot of First Order Differenced Reporting Delay of Black Suspects")
+```
+
+## Identify Possible ARIMA Orders (p, d, q), Manual Search
+
+-   Plot ACF/PACF : Identify possible ARIMA orders (p, d, q) from your differenced data, fit several candidate models manually, and choose the best models based on AIC or BIC. Show the table
+
+p=0,2,3, d=0, 1, q= 0,1,2
+
+> D: Parameter d tells you how many differencings are needed to make the time series stationary. This is important because ARIMA works best on stationary time series data. Non-stationary time series data would not be modeled well by ARIMA. Parameter d=0 or 1 because first order difference seems to make the time series stationary as we can see in the ACF plot where the autocorrelations instantly drop to 0, with just a few significant autocorrelations later in the series. However, we saw from the initial ACF plot that the time series could have been stationary to begin with if looking exclusively at the ACF plots and ADF test. Testing both d=0 and d=1 will help determine the best parameter.
+
+> P: Parameter p determines the number of autoregressive terms in the model which means that it accounts for any correlation between the original time points and its subsequent lags. According to the results in the PACF plot, parameter p could = 0 or 2 or 3. These lags show significance in the PACF plot (which means that lag 0, 2 and 3 correlate significantly with previous lags without the intermediate lags.
+
+> Q: Parameter q represents the influence of noise from previous time steps on the time series. In the ACF plot we see that the earliest significant lags are 0, 1, and 2. So parameter q could = 0 or 1 or 2.
+
+```{r}
+# Load necessary libraries
+library(knitr)
+library(kableExtra)
+
+
+# Define parameter ranges
+p_range <- 0:3
+d_range <- 0:1
+q_range <- 0:2  
+
+# Calculate total combinations
+n_combinations <- length(p_range) * length(d_range) * length(q_range)
+n_combinations
+
+# Create an empty matrix to store results
+results_matrix <- matrix(NA, nrow = n_combinations, ncol = 6)
+#results_matrix
+
+# Initialize index for matrix row
+i <- 1
+
+# Loop through combinations of ARIMA model parameters
+for (d in d_range) {
+  for (p in p_range) {
+    for (q in q_range){
+    
+    # Fit ARIMA model with specified (p,d,q)
+    model <- Arima(black_ts, order = c(p, d, q), include.drift = TRUE)
+    #print(model)
+    
+    # Store model parameters and AIC/BIC/AICc values in matrix
+    results_matrix[i, ] <- c(p, d, q, model$aic, model$bic, model$aicc)
+    #print(results_matrix)
+
+    # Increment row index
+    i <- i + 1 #go to next row at the beginning of next loop
+    #print(i)
+    }
+  }
+}
+
+# Convert matrix to data frame
+results_df <- as.data.frame(results_matrix)
+colnames(results_df) <- c("p", "d", "q", "AIC", "BIC", "AICc")
+
+# Find the row with the lowest scores
+lowest_AIC <- which.min(results_df$AIC)
+lowest_BIC <- which.min(results_df$BIC)
+lowest_AICc <- which.min(results_df$AICc)
+
+# Generate kable table with highlighting for the row with the lowest AIC
+knitr::kable(results_df, align = 'c', caption = "Comparison of ARIMA Models") %>%
+  kable_styling(full_width = FALSE, position = "center") %>%
+  row_spec(lowest_AIC, bold = TRUE, background = "#FFFF99") %>%
+  row_spec(lowest_BIC, bold = TRUE, background = "#008000") %>%
+  row_spec(lowest_AICc, bold = TRUE, background = "#FF0000")
+
+```
+
+The model with the best BIC score was ARIMA(1,0,1), while the model with the best AICc and AIC score was ARIMA(3,1,2).
+
+## Identify Best ARIMA Orders (p, d, q), Auto Search
+
+-   Run auto.arima(), compare its chosen model with your manually selected ones, and use diagnostic plots to determine which model fits best.
+
+```{r}
+auto.arima(black_ts)
+```
+
+> The auto.arima() function chose ARIMA(2,0,0) and ARIMA(2,0,1) as the best possible ARIMA functions.
+
+## Model Diagnostics
+
+-   Perform full model diagnostics on at least two ARIMA models using sarima() (or an equivalent tool) and briefly interpret all diagnostic outputs, including the residual plot, residual ACF, residual distribution, Q–Q plot, and the t-table for parameter significance.
+
+> From the above results we will test whether the following ARIMA models are better:
+>
+> -   ARIMA(1,0,1)
+>
+> -   ARIMA(3,1,2)
+>
+> -   ARIMA(2,0,0)
+>
+> -   ARIMA(2,0,1)
+
+```{r}
+library(astsa)
+#ARIMA(0,1,0)
+set.seed(345)
+model_output <- capture.output(sarima(black_ts, 0, 1, 0))
+
+# Find the line numbers dynamically based on a keyword
+start_line <- grep("Coefficients", model_output)  # Locate where coefficient details start
+end_line <- length(model_output)  # Last line of output
+
+# Print the relevant section automatically
+cat(model_output[start_line:end_line], sep = "\n")
+```
+
+```{r}
+#ARIMA(3,1,2)
+set.seed(345)
+model_output <- capture.output(sarima(black_ts, 3, 1, 2))
+
+# Find the line numbers dynamically based on a keyword
+start_line <- grep("Coefficients", model_output)  # Locate where coefficient details start
+end_line <- length(model_output)  # Last line of output
+
+# Print the relevant section automatically
+cat(model_output[start_line:end_line], sep = "\n")
+```
+
+```{r}
+#ARIMA(2,0,0)
+set.seed(345)
+model_output <- capture.output(sarima(black_ts, 2, 0, 0))
+
+# Find the line numbers dynamically based on a keyword
+start_line <- grep("Coefficients", model_output)  # Locate where coefficient details start
+end_line <- length(model_output)  # Last line of output
+
+# Print the relevant section automatically
+cat(model_output[start_line:end_line], sep = "\n")
+```
+
+```{r}
+#ARIMA(2,0,1)
+set.seed(345)
+model_output <- capture.output(sarima(black_ts, 2, 0, 1))
+
+# Find the line numbers dynamically based on a keyword
+start_line <- grep("Coefficients", model_output)  # Locate where coefficient details start
+end_line <- length(model_output)  # Last line of output
+
+# Print the relevant section automatically
+cat(model_output[start_line:end_line], sep = "\n")
+```
+
+WRITE INTERPRETATIONS OF EACH MODEL'S OUTPUT INCLUDING COEFFICIENT ANALYSIS.
+
+> Overall, ARIMA(2,0,1) is the best when looking mostly at the Ljung box results, then the coefficients p-values.
+
+## Comparing Best ARIMA Model to Benchmark Methods
+
+-   Compare your best ARIMA model to benchmark methods using the plotting the forecasts and other error measurements such as MAE and MSE to decide whether your model outperforms simple forecasting approaches.
+
+```{r}
+# Fit ARIMA(2,0,1) model
+fit <- Arima(black_ts, order = c(2, 0, 1), include.drift = TRUE)
+
+# Display model summary
+summary(fit)
+```
+
+```{r}
+#GENERATE FORECASTS
+#mean forecast
+mean_forecast <- meanf(black_ts, h = 36)
+head(mean_forecast$mean) #see the head of the forecasted values - all same
+mean(black_ts) #the mean forecast predicts this number, average price
+
+#naive forecast
+naive_forecast <- naive(black_ts, h = 36)
+head(naive_forecast$mean) #see the head of the forecasted values - all same
+tail(black_ts, 1) #the naive forecast predicts this number, last observed price
+
+#drift forecast
+drift_forecast <- rwf(black_ts, drift = TRUE, h = 36)
+head(drift_forecast$mean) #see the head of the forecasted values - not all same
+#predicts random walk with drift, ie allows the price to increase or decrease according to the average trend in price from observed data
+
+#arima forecast
+arima_forecast <- forecast(fit, h = 36)
+
+#PLOT TO COMPARE THESE FORECASTS
+#STATIC PLOT
+autoplot(black_ts) +
+  autolayer(meanf(black_ts, h = 36), series = "Mean", PI = FALSE) +
+  autolayer(naive(black_ts, h = 36), series = "Naïve", PI = FALSE) +
+  autolayer(rwf(black_ts, drift = TRUE, h = 36), series = "Drift", PI = FALSE) +
+  autolayer(forecast(fit, h = 36), series = "ARIMA Fit", PI = FALSE) +
+  ggtitle("FWONK Adjusted Daily Price Forecast") +
+  xlab("Date") + ylab("FWONK Adjusted Daily Price") +
+  guides(colour = guide_legend(title = "Forecast Methods")) +
+  theme_minimal()
+
+
+#INTERACTIVE PLOTLY PLOT
+# Original data
+black_df_plotly <- data.frame(Date = time(black_ts), avg_report_delay_days = as.numeric(black_ts))
+
+# Convert forecasts to data frames
+mean_df <- data.frame(Date = time(mean_forecast$mean), Mean = as.numeric(mean_forecast$mean))
+naive_df <- data.frame(Date = time(naive_forecast$mean), Naive = as.numeric(naive_forecast$mean))
+drift_df <- data.frame(Date = time(drift_forecast$mean), Drift = as.numeric(drift_forecast$mean))
+arima_df <- data.frame(Date = time(arima_forecast$mean), ARIMA_Fit = as.numeric(arima_forecast$mean))
+
+#interactive plotly plot
+plot_ly() %>%
+  add_lines(data = black_df_plotly, x = ~Date, y = ~avg_report_delay_days, name = 'Original Data', line = list(color = 'black')) %>%
+  add_lines(data = mean_df, x = ~Date, y = ~Mean, name = 'Mean Forecast', line = list(color = 'blue')) %>%
+  add_lines(data = naive_df, x = ~Date, y = ~Naive, name = 'Naïve Forecast', line = list(color = 'red')) %>%
+  add_lines(data = drift_df, x = ~Date, y = ~Drift, name = 'Drift Forecast', line = list(color = 'green')) %>%
+  add_lines(data = arima_df, x = ~Date, y = ~ARIMA_Fit, name = 'ARIMA Fit', line = list(color = 'purple')) %>%
+  layout(title = 'FWONK Adjusted Daily Price Forecast',
+         xaxis = list(title = 'Date'),
+         yaxis = list(title = 'FWONK Adjusted Daily Price'),
+         legend = list(title = list(text = 'Forecast Methods')))
+```
+
+```{r}
+#COMPARING MAE AND MSE ACCURACY
+
+#ARIMA accuracy
+accuracy(fit)
+
+#Benchmark Accuracy
+accuracy(mean_forecast)
+accuracy(naive_forecast)
+accuracy(drift_forecast)
+
+```
+
+When looking at the RMSE and MAE values, the ARIMA(2,0,1) performs best compared to benchmark methods.
+
+## Final Forecast with Best ARIMA Model
+
+-   Produce a final forecast plot for your best model and write a short, clear interpretation of what the forecast indicates about future behavior.
+
+```{r}
+best_model_forecast <- forecast(fit, h = 36)
+accuracy(best_model_forecast)
+
+# Plot the forecast
+autoplot(best_model_forecast, PI = FALSE) +
+  labs(title = "Forecast of Reporting Delay of Black Suspects",
+       x = "Time",
+       y = "Predicted Values") +
+  theme_minimal()
+
+# Plot with GRAY intervals
+no_shades <- autoplot(best_model_forecast, 
+         fcol = "black",   # Color of the forecast line
+         flwd = 1,         # Width of the forecast line
+         ts.colour = "black", # Color of the time series line
+         shadecols = c("#D3D3D3", "#808080")) + # Light Gray (80%) and Dark Gray (95%)
+  labs(title = "Forecast of Reporting Delay of Black Suspects",
+       x = "Time",
+       y = "Predicted Values") +
+  theme_minimal()
+
+ggsave("no_shade.png", plot = no_shades, width = 10, height = 6, units = "in", dpi = 300)
+```
+
+```{r}
+#plotly plot
+# --- 1. Load & prepare data (Already loaded in your environment as fwonk_df) ---
+# Ensure Date is properly formatted
+black_df
+black_df$report_month <- as.Date(black_df$report_month)
+
+# --- 2. Create time series and fit ARIMA ---
+# Note: You likely already created 'fwonk_ts' and 'fit' in previous steps, 
+# but redefining here ensures the code runs standalone.
+black_ts <- ts(
+  black_df$avg_report_delay_days,
+  start     = decimal_date(min(black_df$report_month)),
+  frequency = 36 # Trading days
+)
+
+# Fit your chosen model: ARIMA(0,1,0) with drift
+fit <- Arima(black_ts, order = c(2, 0, 1), include.drift = TRUE)
+fc  <- forecast(fit, h = 252) # Forecast 1 year ahead
+
+# --- 3. Put results in a tidy data frame for Plotly ---
+fc_df <- tibble(
+  Date     = seq(max(black_df$report_month) + 1,
+                 by = "day",
+                 length.out = length(fc$mean)),
+  Forecast = as.numeric(fc$mean),
+  Lo80     = as.numeric(fc$lower[,1]),
+  Hi80     = as.numeric(fc$upper[,1]),
+  Lo95     = as.numeric(fc$lower[,2]),
+  Hi95     = as.numeric(fc$upper[,2])
+)
+
+# --- 4. Build interactive plot ---
+p <- plot_ly() %>%
+  add_lines(
+    data = black_df,
+    x = ~report_month, y = ~avg_report_delay_days,
+    name = "Actual", line = list(color = "gray")
+  ) %>%
+  add_lines(
+    data = fc_df,
+    x = ~Date, y = ~Forecast,
+    name = "Forecast", line = list(color = "blue")
+  ) %>%
+  add_ribbons(
+    data = fc_df,
+    x = ~Date, ymin = ~Lo95, ymax = ~Hi95,
+    name = "95% CI", fillcolor = "rgba(0,0,255,0.1)",
+    line = list(width = 0)
+  ) %>%
+  add_ribbons(
+    data = fc_df,
+    x = ~Date, ymin = ~Lo80, ymax = ~Hi80,
+    name = "80% CI", fillcolor = "rgba(0,0,255,0.2)",
+    line = list(width = 0)
+  ) %>%
+  layout(
+    title = "ARIMA(2,0,1) Forecast of Reporting Delay of Black Suspects",
+    xaxis = list(title = "Report Month"),
+    yaxis = list(title = "Average Reporting Delay (Days)"),
+    legend = list(x = 0.02, y = 0.98)
+  )
+
+p
+```

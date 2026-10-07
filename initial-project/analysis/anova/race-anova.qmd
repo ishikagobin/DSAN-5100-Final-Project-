@@ -1,0 +1,934 @@
+---
+title: "ANOVA for Race"
+format:
+    html:
+        embed-resources: true
+---
+
+# Chi Square Replication
+
+### ANOVA
+
+For example, conduct chi square test for race across 2 time periods. For race - is the count for each racial group different before vs. after Patternizr?
+
+```{r}
+# CLEANING THE DATA
+
+
+library(tidyverse)
+complaints_nonull_demographic <- read_csv("../../data/cleaning/null_demographics_removed.csv")
+complaints_nonull_demographic
+```
+
+```{r}
+#CLEAN TO REMOVE UNKNOWN RACE CATEGORY
+#remove "U" values in age column assuming they mean unknown - confirm that this is how Jackson did null bootstrap analysis*
+
+race_df <- complaints_nonull_demographic |>
+  filter(susp_race != "UNKNOWN")
+
+race_df
+nrow(complaints_nonull_demographic) #355,241
+#nrow(race_df) #302,875
+
+
+#VISUALIZE (for all precincts before vs. after)
+#ggplot(data=race_df, aes(x=time_period, fill=susp_race)) +
+#  geom_bar()
+```
+
+```{r}
+#FIND TOP 20 PRECINCTS WITH THE MOST COMPLAINTS FROM NO NULL DEMOGRAPHIC
+
+top_20_precincts <- complaints_nonull_demographic |>
+  count(precinct_crime, sort = TRUE) |>  
+  slice_max(n, n = 20)              
+
+#top_20_precincts$precinct_crime
+
+
+#filter to keep only top 20 precincts after removing null from 3 demographics
+race_df <- race_df |>
+  filter(precinct_crime %in% top_20_precincts$precinct_crime)
+#race_df
+
+#table(race_df$precinct_crime)
+
+#VISUALIZE (for top 20 precincts before vs. after)
+#ggplot(data=race_df, aes(x=time_period, fill=susp_race)) +
+#  geom_bar()
+
+```
+
+```{r}
+race_df
+top_20_precincts
+
+chisq_results <- tibble() #empty tibble to store results
+residuals_list <- list()
+
+for (precinct in top_20_precincts$precinct_crime) {
+  #filter only this precinct, one of top 20
+  precinct_df <- race_df |> filter(precinct_crime == precinct)
+
+  #create table that shows sex before and after patternizr for this precinct
+  precinct_table <- table(precinct_df$susp_race, precinct_df$time_period)
+  print(precinct_table)
+  
+  #chisquare test - is the specific count before vs. after the same?
+  #chi_result <- chisq.test(precinct_table)
+  chi_result <- chisq.test(precinct_table, simulate.p.value = TRUE) #monte carlo simulation to resolve the warning that value counts are too small
+  #print(chi_result)
+  
+  #store results
+  chisq_results <- chisq_results |>
+    bind_rows(tibble(
+      precinct_crime = precinct,
+      statistic = as.numeric(chi_result$statistic),
+      p_value = chi_result$p.value,
+      df = chi_result$parameter
+    ))
+  
+  #store residuals
+  residuals_df <- as.data.frame(chi_result$stdres) |>
+    rename(race = Var1, time_period = Var2, std_residual = Freq) |>
+    mutate(precinct_crime = precinct)
+  #print(residuals_df)
+  #print(chi_result$stdres)
+  
+  residuals_list[[as.character(precinct)]] <- residuals_df
+}
+
+chisq_results
+#write.csv(chisq_results, "race_chisq_results.csv", row.names = FALSE)
+
+# Combine all residuals into one dataframe
+all_residuals <- bind_rows(residuals_list)
+all_residuals
+```
+
+```{r}
+chisq_results_siglabel <- chisq_results |>
+  mutate(significance_level = case_when(
+    p_value < 0.05 ~ "reject",
+    p_value > 0.05 ~ "fail to reject",
+  ))
+chisq_results_siglabel
+
+
+
+# Create the plot
+chi_results_plot <- ggplot(chisq_results_siglabel, aes(x = significance_level, fill = significance_level)) +
+  geom_bar() + 
+
+  # Custom colors
+  scale_fill_manual(values = c("reject" = "#d73027", "fail to reject" = "#999999")) +
+  
+  geom_text(stat='count', aes(label=after_stat(count)), vjust=-0.5, size=5) +
+  
+  scale_y_continuous(limits = c(0, 22)) +
+  
+  # Labels and themes
+  labs(
+    title = "Count of Precincts with Statistically Significant Differences",
+    x = "Significance Result",
+    y = "Number of Precincts",
+    fill = "Result"
+  ) +
+  theme_minimal()
+chi_results_plot
+
+ggsave("chi_results_significant.png", plot = chi_results_plot, width = 6, height = 4, units = "in", dpi = 300)
+```
+
+After conducting the chi square test AND finding the residual values for each precinct's racial group in both before and after Patternizr, we have information on whether there seems to be a statistically significant difference before vs. after Patternizr in the counts of racial group complaints in each precinct AND information on which racial groups/time periods/precincts specifically showed the most significant change (as shown in the standard residual values).
+
+Above we can see that for instance, in precinct 75, when its after Patternizer and the suspect is American Indian/Alaskan Native, they are -1.14 standard deviations less than from the expected count if there was no relationship between time and race. This could be interpreted to mean that in precinct 75, American Indians/Alaskan Natives after Patternizr are likely due to random chance and not indicative of any relationship between their race and the time period. This means that the representation of this group did not change significantly after Patternizr.
+
+However, in precinct 75, when it's before Patternizr and the suspect is Black they are 2.8 standard deviations greater from the expected count if there was no relationship between time and race. This can be interpreted to mean that in precinct 74, Black suspects after Patternizr are not very likely due to random chance which indicates there may be a relationship between race and the time period. This means that this group was over-represented before Patternizr, but under-represented after - for precinct 75.
+
+*The residual tells us how different the \[racial group\] in the \[time period\] in the \[precinct\] is from the expected count if there was no relationship between race and time period.*
+
+```{r}
+# 3. Precincts with statistically significant race distribution change
+sig_race_chi_results <- chisq_results %>%
+  filter(p_value < 0.05)
+
+sig_race_chi_results
+
+sig_race_chi_precincts <- sig_race_chi_results %>%
+  distinct(precinct_crime) %>%
+  pull()
+
+sig_race_chi_precincts
+
+#write.csv(sig_race_chi_precincts,
+#          "race_precinct_chi_result_significant.csv",
+#          row.names = FALSE)
+```
+
+```{r}
+#sort residual df by highest absolute value of standard residual
+sorted_residuals <- all_residuals |>
+  arrange(desc(abs(std_residual)))
+#print(sorted_residuals)
+
+#filter to only after Patternizr
+after_sorted_residuals <- sorted_residuals |> 
+  filter(time_period == "after Patternizr") 
+#print(after_sorted_residuals) #120 / 2 = 60
+
+#filter to only significant after Patternizr
+significant_after_sorted_residuals <- after_sorted_residuals |> #only where standard residual is beyond the 5% significance level
+  filter(abs(std_residual) > 1.96) 
+#print(significant_after_sorted_residuals) #56
+#1.96 is the z-score that is the cut off for 5% significance, there's a 5% chance that this could have happened if there was no relationship between time period and race
+
+#sort by precinct_crime, add column to indicate over or under representation
+sorted_by_precinct <- significant_after_sorted_residuals |> 
+  arrange((precinct_crime)) |>
+  mutate(representation = case_when(
+    std_residual >= 1.96 ~ "over",
+    std_residual <= 1.96 ~ "under",
+  ))
+sorted_by_precinct
+
+# ... [Your existing code above] ...
+
+# 1. CREATE SUMMARY TABLE
+race_comparison <- sorted_by_precinct |>
+  group_by(race, time_period, representation) |>
+  summarise(count = n(), .groups = "drop") |>
+  pivot_wider(
+    names_from = representation, 
+    values_from = count, 
+    values_fill = 0
+  )
+
+print(race_comparison)
+
+
+# 2. VISUALIZE THE COMPARISON (Diverging Bar Chart)
+# We need to make 'under' values negative for plotting purposes
+plot_data <- sorted_by_precinct |>
+  count(race, representation) |>
+  mutate(n = ifelse(representation == "under", -n, n))
+
+library(stringr) # Make sure this is loaded
+
+font_family <- "sans"
+
+chisq_residuals_plot <- ggplot(plot_data, aes(x = reorder(race, n), y = n, fill = representation)) +
+  geom_col() +
+  coord_flip() +
+  geom_hline(yintercept = 0, color = "black") + 
+  
+  scale_fill_manual(values = c("under" = "#527699", "over" = "#C6983B")) +
+  
+  # NEW LINE: This wraps any label longer than 15 characters
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 15)) +
+  
+  labs(
+    title = "Significant Deviations in Suspect Counts\nafter Patternizr",
+    x = "Race",
+    y = "Number of Precincts",
+    fill = "Representation"
+  ) +
+  theme_minimal() + 
+  # Optional: Make the font slightly smaller if it's still tight
+  #theme(axis.text.y = element_text(size = 8))  +
+
+  theme(
+      # Center and bold the title, making it slightly larger
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 12),
+      
+      # Bold the axis titles
+      axis.title = element_text(face = "bold", size = 10),
+      
+      # Bold the axis text (race names and precinct counts)
+      axis.text = element_text(face = "bold", size = 8, color = "black"),
+      
+      # Optional: adjust the size and style of the y-axis (race) text if needed
+      #axis.text.y = element_text(size = 10),
+      
+      # Make the legend title bold and adjust its size
+      legend.title = element_text(face = "bold", size = 10)
+    )
+
+chisq_residuals_plot
+
+ggsave("chi_residual_results.png", plot = chisq_residuals_plot, width = 6, height = 4, units = "in", dpi = 300)
+```
+
+Overall, these results seem to be telling us that in some precincts historically marginalized racial groups become underrepresented while other groups become overrepresented. This suggests that Patternizr actually helps correct for racial bias that we know exists in policing. The opposite effect is found in a few precincts, where some historically marginalized racial groups become overrepresented - however they make up a very small portion of the instances where there is a statistically significant difference in representation for a given racial group in a given precinct after Patternizr. Of the 60 different instances of whether a racial group is overrepresented after Patternizr (one for each race x each precinct), 56 of them are statistically significant. Of these 56, most of them show bias becomes "corrected".
+
+For example, in precinct 48 Black Hispanics were overrepresented after Patternizr at a statistically significant rate. In precinct 113 Black Hispanics were overrepresented. In precinct 43 Black hispanic were overrepresented. In precicnt 41 Black were overrepresented.
+
+```{r}
+library(janitor) # convenient for crosstabs
+
+# Pick one of your "weird" precincts (e.g., 103)
+check_precinct <- race_df |> filter(precinct_crime == 103)
+
+# View the raw counts
+print("RAW COUNTS:")
+table(check_precinct$susp_race, check_precinct$time_period)
+
+# View the PERCENTAGES (by time period)
+# This will show you the "share" of each race before vs. after
+print("PERCENTAGES (Column %):")
+tabyl(check_precinct, susp_race, time_period) |> 
+  adorn_percentages("col") |>
+  adorn_pct_formatting(digits = 1)
+```
+
+# ANOVA
+
+## Monthly Average as Dependent Variable
+
+ANOVA tests whether there is a statistically significant difference in some continuous variable depending some categorical variables with 2+ groups. In our case, we are going to use two-way ANOVA to determine whether there is a statistically significant difference in monthly average arrests depending on racial group and/or time period.
+
+For example in precinct 103, we're looking at at least 3 different races (let's say: Black, White, Asian) and 2 different time periods (before and after Patternizr). Now we want to conduct a statistical test to see whether the average monthly arrests differs by racial group independently, time period independently, AND racial group and time period together (interaction effect). In the actual data, there may be different numbers of racial groups represented, however we will always have two time periods of before and after Patternizr.
+
+It would be interesting to see something like this: Black suspects are complained about the most on a monthly average basis; after Patternizr there were more complaints per month; and if you're Black and it's after Patternizr, there is a statistically significant chance you will be disproportionately complained about to police.
+
+### Conducting ANOVA with just one precinct to test the logic and code for precinct 103 only
+
+```{r}
+### PERFORMING STANDARD ANOVA TO TEST LOGIC AND CODE
+
+#SET UP
+#looking at precinct 103 only
+p103 <- race_df |>
+  filter(precinct_crime == 103)
+p103
+
+#create new dataframe containing monthly total number of complaints for every racial group
+p103_monthly_counts <- p103 |>
+  mutate(month = floor_date(complaint_date, "month")) |>
+  count(susp_race, time_period, month) |>
+  ungroup() |> #suggested by LLM to fill 0 for months with no complaints of that race/time period
+  complete(susp_race, time_period, month, fill = list(n = 0)) |> #suggested by LLM to fill 0 for months with no complaints of that race/time period
+  rename(n_complaints = n) |>
+  mutate( #suggested by LLM to resolve error when running ART below
+    susp_race = factor(susp_race),
+    time_period = factor(time_period)
+  )
+p103_monthly_counts
+
+#ANOVA - two way with race (2+ groups) and time period (before vs after) as IV and monthly average as DV
+#Does the average monthly complaints differ by race and/or time period? 
+anova_model <- aov(n_complaints ~ susp_race * time_period, data = p103_monthly_counts)
+
+# View the results table
+summary(anova_model)
+```
+Above we can see that there is both a main effect and interaction effect of the two independent variables. 
+
+Main effect interpretation: the suspect's race has a statistically significant effect on the monthly average number of complaints; similarly the time period has a statistically significant effect on the monthly average number of complaints. This means that some racial groups were complained about more frequently than others when looking at the monthly average number of complaints. It also means that the time period (implementation of Patternizr) changed the average monthly number of complaints.
+
+However since the interaction effect was statistically significant, we cannot say that these two variables are truly "independent" in how they affect the monthly average number of complaints.
+
+Interaction effect interpretation: the important takeaway from the result above is that the interaction of time period and race had a statistically significant effect on the monthly average number of complaints. This tells us that the change in average monthly number of complaints from before to after Patternizr is not the same per every racial group. In other words, the change complaints after the implementation of Patternizr had disproportionate effects on different racial groups.
+
+However, we cannot tell from this information which groups were affected disproportionately. Thus, we conduct post-hoc tests to make this determination.
+
+```{r}
+#VISUALIZATION
+library(ggplot2)
+
+ggplot(p103_monthly_counts, aes(x = susp_race, y = n_complaints, fill = time_period)) +
+  geom_boxplot() +
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 15)) +
+  labs(title = "Monthly Complaints by Race in Precinct 103",
+       x = "Racial Group",
+       y = "Monthly Complaints") +
+  theme_minimal()
+```
+
+However, before reporting these results we need to check to see whether the assumptions of the standard ANOVA are violated before we trust and interpret these results. ANOVA assumes that the means are equal in variance and normally distributed.
+
+```{r}
+#CHECK ASSUMPTIONS
+library(car)
+library(ggplot2)
+
+#extract residuals from the standard anvova model
+model_residuals <- residuals(anova_model)
+fitted_values <- fitted(anova_model)
+
+#check normality assumption
+shapiro.test(model_residuals) #p-value less than 0.05 means it is NOT normal
+
+qqnorm(model_residuals)
+qqline(model_residuals, col = "red", lwd = 2)
+
+#check equal variance between groups assumption
+leveneTest(n_complaints ~ susp_race * time_period, data = p103_monthly_counts) #p-value less than 0.05 means they are NOT equal
+
+plot(fitted_values, model_residuals, 
+     main = "Residuals vs Fitted", xlab = "Fitted Values", ylab = "Residuals")
+abline(h = 0, col = "red")
+```
+
+The results from the Shapiro-Wilk test and Levene's test are significant, which means we can reject the null hypothesis that the data is normal and has equal variance. Since the assumptions of normality and variance are both violated for the precinct above, we will use a non-parametric version of ANOVA, the Algined Rank Transform method.
+
+```{r}
+library(ARTool)
+
+#run non-parametric ANOVA given that both normality and equal variance assumptions are violated
+art_model <- art(n_complaints ~ susp_race * time_period, data = p103_monthly_counts)
+
+# Get the results
+art_results <- anova(art_model)
+art_results
+```
+
+For precinct 103, we can see that the results are the same as the one's from our standard ANOVA (refer above for interpretations). However, we know that these results are valid since the ART ANOVA does not require the same assumptions of normality and equal variance.
+
+### ANOVA for all top 20 precincts
+
+Now, we need to repeat this analysis for 20 more precincts. To do this, we will create a function and apply it to all precincts of interest.
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(car)
+library(ARTool)
+
+anova_analysis <- function(precinct_id, full_df) {
+  
+  # A. DATA PREPARATION ----------------------------------------------
+  # Filter for the specific precinct
+  pct_data <- full_df |>
+    filter(precinct_crime == precinct_id)
+  
+  # Aggregate to Monthly Counts (inc. filling zeros)
+  pct_monthly <- pct_data |>
+    mutate(month = floor_date(complaint_date, "month")) |>
+    count(susp_race, time_period, month) |>
+    ungroup() |>
+    complete(susp_race, time_period, month, fill = list(n = 0)) |>
+    rename(n_complaints = n) |>
+    mutate(
+      susp_race = factor(susp_race),
+      time_period = factor(time_period)
+    )
+  
+  # --- SAFETY CHECK: CRITICAL FIX ---
+  # Check if we have enough levels to compare (Need at least 2 races AND 2 periods)
+  if (nlevels(pct_monthly$susp_race) < 2 || nlevels(pct_monthly$time_period) < 2) {
+    message(paste("Skipping Precinct", precinct_id, "- Not enough factor levels."))
+    return(NULL)
+  }
+  
+  # Check if variance exists (cannot analyze if all counts are exactly 0 or constant)
+  if (var(pct_monthly$n_complaints) == 0) {
+    message(paste("Skipping Precinct", precinct_id, "- No variance in complaints."))
+    return(NULL)
+  }
+  # ----------------------------------
+  
+  # B. VISUALIZATION -------------------------------------------------
+  # Create the boxplot and save it to a variable
+  p_plot <- ggplot(pct_monthly, aes(x = susp_race, y = n_complaints, fill = time_period)) +
+    geom_boxplot() +
+    labs(title = paste("Precinct", precinct_id, "- Monthly Complaints"),
+         x = "Racial Group", y = "Count") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+  
+  # C. ASSUMPTION CHECKING (AUTOMATED) -------------------------------
+  # Run standard ANOVA just to get residuals for testing
+  std_model <- aov(n_complaints ~ susp_race * time_period, data = pct_monthly)
+  resids <- residuals(std_model)
+  
+  # Run tests and save p-values (Normal if > 0.05, Homogeneous if > 0.05)
+  shapiro <- shapiro.test(resids)$p.value
+  levene  <- leveneTest(n_complaints ~ susp_race * time_period, data = pct_monthly)$`Pr(>F)`[1]
+  
+  assumptions <- data.frame(
+    precinct_crime = precinct_id,
+    Shapiro_P = round(shapiro, 4),
+    Levene_P = round(levene, 4),
+    Normal = ifelse(shapiro > 0.05, "Yes", "No"),
+    EqualVar = ifelse(levene > 0.05, "Yes", "No")
+  )
+  
+  # D. ROBUST ANOVA (ARTool) -----------------------------------------
+  if (shapiro < 0.05 | levene < 0.05){
+    art_model <- art(n_complaints ~ susp_race * time_period, data = pct_monthly)
+    art_results <- anova(art_model)
+
+    art_df <- as.data.frame(art_results)
+    art_df$precinct_crime <- precinct_id #add precinct_id column
+  }
+  #this would fail if any of the assumptions were not violated BUT shouldn't since all top 20 precincts dfs assumptions are violated
+  
+  
+  # E. RETURN EVERYTHING ---------------------------------------------
+  # Return a list containing all the pieces
+  return(list(
+    precinct_crime = precinct_id,
+    boxplot = p_plot,
+    assumptions_df = assumptions,
+    art_df = art_df, 
+    art_model = art_model
+  ))
+}
+```
+
+```{r}
+#Apply the function to all precincts
+
+# 1. Define your list of precincts
+top_20_precincts
+#top10_precincts_chisq <- c(103, 113, 73, 81, 83, 71, 105, 79, 41) #may as well apply to all top 20 precincts
+
+# 2. Run the function on all precincts
+# This stores all results in a master list
+all_anova_results <- lapply(top_20_precincts$precinct_crime, function(x) {
+  anova_analysis(precinct_id = x, full_df = race_df)
+})
+
+# 3. Name the list items for easy access
+names(all_anova_results) <- as.character(top_20_precincts$precinct_crime)
+print(all_anova_results) 
+```
+
+The above variable (all_anova_results) contains the list of results from the function, including assumptions_df, art_df, and art_model. Now we need to look at just the art_df to be able to interpret the results.
+
+```{r}
+#Extarct only the ART/ANOVA results
+# 1. Extract just the 'art_df' table from every precinct in the list
+# This creates a list of dataframes (ignoring the plots and assumption tables)
+list_of_art_tables <- lapply(all_anova_results, function(x) x$art_df)
+
+# 2. Bind them all into one giant dataframe
+all_art_tables_df <- bind_rows(list_of_art_tables)
+
+# 3. View the final result
+print(all_art_tables_df)
+
+#keep only the significant main effects/interaction effects per precinct
+sig_art_results <- all_art_tables_df |>
+  filter(`Pr(>F)` < 0.05)
+sig_art_results
+
+# Optional: Export to CSV
+# write_csv(giant_anova_df, "all_precincts_anova_results.csv")
+
+```
+
+We can see from the analysis that in every precinct, both the independent factors and their interaction have a statistically significant effect on the monthly average of complaints. This means that we see the same result for every single precinct which is that the implementation of Patternizr had a disproportionate effect on the number of average monthly complaints based on racial group. 
+
+Now we conduct a post-hoc test to determine which of those racial groups and in which of the time periods drove this difference in monthly average of complaints. Since we need to do this for all 20 precincts, let's write a function to apply to all individual precinct data.
+
+```{r}
+library(emmeans)
+library(dplyr)
+
+# DEFINE THE FUNCTION
+run_posthoc_analysis <- function(precinct_result) {
+  
+  # 1. Extract the model and ID from your previous results list
+  # Note: This requires that you included 'art_model' in the return list of your previous function!
+  model <- precinct_result$art_model 
+  precinct_id <- precinct_result$precinct_crime
+  
+  # Safety Check: If the model is NULL (precinct was skipped), return NULL
+  if (is.null(model)) {
+    return(NULL)
+  }
+  
+  # --- STEP 1: THE FIX --------------------------------------------
+  # Extract the specific linear model for the Interaction term ("susp_race:time_period").
+  # 'emmeans' knows exactly how to handle this 'linear_model' object.
+  linear_model <- artlm(model, "susp_race:time_period")
+  
+  # --- STEP 2: RUN EMMEANS ON THE EXTRACTED MODEL -----------------
+  # Now we pass 'linear_model' instead of 'model'
+  # We use the formula ~ susp_race | time_period to "slice" by time
+  emm <- emmeans(linear_model, ~ susp_race | time_period)
+  
+  # --- STEP 3: RUN CONTRASTS --------------------------------------
+  # 3. Run Pairwise Contrasts (The "Slicing")
+  # by = "time_period": Ensures we compare races ONLY within the same era 
+  # (e.g. Black vs White in "After", not Black-After vs White-Before)
+  contrasts <- contrast(emm, method = "pairwise", adjust = "tukey")
+  
+  # 4. Clean up the results
+  # summary(..., infer = TRUE) adds p-values
+  contrasts_df <- summary(contrasts, infer = TRUE) |>
+    as.data.frame() |>
+    
+    # Filter to look ONLY at "After Patternizr" (Your specific interest)
+    #filter(time_period == "after Patternizr") |>
+    
+    # Add Precinct ID for tracking
+    mutate(precinct_crime = precinct_id) |>
+    relocate(precinct_crime)
+  
+  return(contrasts_df)
+}
+```
+
+Note that in the above function, we extract the linear model of the interaction effect only from the ART result because ART has 3 different versions of results based on whether you want to look at race, time period or their interaction. In other words, ART contains a separate linear model for the main effects (race, time period) and their interaction effect. Since we saw from the previous results that everything is statistically significant, we are most interested now in looking at the interaction effect. In fact, if we looked at just the main effects - according to the results of the ART analysis - we may be missing a more nuanced effect from the interaction of the main effects. Doing so will help us understand whether race AND time period have an effect on monthly average complaints. An interesting finding here would be something like: for precinct 103, being Black after Patternizr drove the most monthly average complaints.
+
+```{r}
+# APPLY THE FUNCTION
+# Assuming 'all_anova_results' is the list you created in the previous step
+posthoc_list <- lapply(all_anova_results, run_posthoc_analysis)
+#print(posthoc_list)
+
+# COMBINE INTO ONE DATAFRAME
+final_posthoc_df <- bind_rows(posthoc_list)
+final_posthoc_df #602
+
+#add label for significant racial combo + time period
+final_posthoc_df <- final_posthoc_df |>
+  mutate(significance_level = case_when(
+    p.value < 0.05 ~ "significant",
+    p.value >= 0.05 ~ "not significant"
+  )) |>
+  select(precinct_crime, contrast, time_period, estimate, SE, p.value, significance_level)
+final_posthoc_df
+
+# VIEW ONLY SIGNIFICANT RESULTS
+# This answers: "In which precincts and for which two races are the racial gaps statistically significant?"
+significant_gaps <- final_posthoc_df |>
+  filter(p.value < 0.05) |>
+  arrange(precinct_crime, p.value)
+print(significant_gaps) #only 262 are significant!!!! 
+
+#(significant_gaps |> filter(time_period == "after Patternizr"))
+#(significant_gaps |> filter(time_period == "before Patternizr"))
+```
+
+```{r}
+#VISUALIZE RESULTS OF HOW MANY PRECINCTS SHOWED SIGNIFICANCE FOR CONTRAST + TIME PERIOD COMBO
+library(tidyverse)
+
+# --- 1. PROCESS THE DATA ---
+# We assume your dataframe is named 'post_hoc_results'
+
+viz_data <- final_posthoc_df |> 
+  # A. Filter for STATISTICALLY SIGNIFICANT results only
+  filter(p.value < 0.05) |> 
+  
+  # B. Count how many precincts show this specific result
+  # Group by the specific comparison (contrast) and the context (time_period)
+  count(contrast, time_period, name = "precinct_count") |> 
+  
+  # C. Create a total count column just for sorting purposes in the plot later
+  group_by(contrast) |> 
+  mutate(total_count_for_sorting = sum(precinct_count)) |> 
+  ungroup()
+viz_data
+
+# --- 2. CREATE THE SIDE-BY-SIDE PLOT ---
+anova_precinct_freq_plot <- ggplot(viz_data, aes(x = precinct_count, 
+                                     # Reorder Y-axis based on the total count
+                                     y = reorder(contrast, total_count_for_sorting), 
+                                     fill = time_period)) +
+  
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  
+  geom_text(aes(label = precinct_count), 
+            position = position_dodge(width = 0.8), 
+            hjust = -0.2, 
+            size = 3.5) +
+  
+  labs(title = "Frequency of Significant Racial Disparities across Precincts",
+       x = "Number of Precincts",
+       y = NULL, 
+       fill = "Time Period") +
+  
+  theme_minimal() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    axis.text.y = element_text(size = 9),
+    legend.position = "bottom",
+    # CRITICAL FIX 1: Allow text to spill over the edge if needed
+    plot.margin = margin(r = 20, unit = "pt") 
+  ) +
+  
+  # CRITICAL FIX 2: Turn off clipping so labels at the very edge aren't hidden
+  coord_cartesian(clip = "off") +
+  
+  # CRITICAL FIX 3: Increase the expansion buffer to 20% (from 10%)
+  scale_x_continuous(expand = expansion(mult = c(0, 0.2)))
+
+anova_precinct_freq_plot
+
+# CRITICAL FIX 4: Increase width to 10 inches to accommodate long racial group names
+ggsave("anova_precinct_freq.png", plot = anova_precinct_freq_plot, width = 10, height = 6, units = "in", dpi = 300)
+```
+```{r}
+significant_gaps
+
+sig_gaps_count <- significant_gaps |>
+  filter(contrast == c("BLACK - WHITE", "(ASIAN / PACIFIC ISLANDER) - BLACK", "(AMERICAN INDIAN/ALASKAN NATIVE) - WHITE")) |>
+  mutate(representation = case_when(
+    estimate > 0 ~ "over",
+    estimate < 0 ~ "under"
+  )) |>
+  count(contrast, time_period, representation)
+sig_gaps_count
+
+sig_gaps_before <- sig_gaps_count |>
+  filter(time_period == "before Patternizr")
+sig_gaps_before
+
+sig_gaps_after <- sig_gaps_count |>
+  filter(time_period == "after Patternizr")
+sig_gaps_after
+```
+
+All in one
+```{r}
+
+# Ensure the time_period order is correct
+sig_gaps_count$time_period <- factor(sig_gaps_count$time_period, 
+                                   levels = c("before Patternizr", "after Patternizr"))
+
+sig_gaps_count_plot <- ggplot(sig_gaps_count, aes(x = contrast, y = n, fill = representation)) + 
+  
+  # 1. Vertical Bars
+  # We swapped x and y in the aes() above. 
+  geom_col(position = position_dodge(width = 0.9), width = 0.8) +
+  
+  # 2. Adjust Text Labels for Vertical Bars
+  # vjust = -0.5 puts the number on top of the standing bar
+  geom_text(aes(label = n), 
+            position = position_dodge(width = 0.9), 
+            vjust = -0.5, 
+            size = 3) +
+  
+  # Facet remains the same
+  facet_wrap(~ time_period) +
+  
+  labs(
+    title = "Significant Differences: Before vs. After Patternizr",
+    subtitle = "Comparison of outcome frequency by contrast pair",
+    x = NULL, # Remove X label since the text is self-explanatory
+    y = "Frequency of Occurrence Across Precincts", 
+    fill = "Representation"
+  ) +
+  
+  # Wrap the text a bit tighter since it's on the bottom now
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 20)) +
+  
+  scale_fill_manual(values = c("over" = "#0072B2", "under" = "#D55E00")) +
+  
+  theme_minimal() +
+  theme(
+    # 3. TILT THE LABELS
+    # angle = 45 rotates the text. hjust = 1 aligns it so it doesn't overlap the bar.
+    #axis.text.x = element_text(angle = 45, hjust = 1, size = 9),
+    
+    # 4. CENTER THE TITLES
+    # hjust = 0.5 moves the title to the middle of the plot
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5),
+    
+    # Add extra margin at the bottom so the tilted text doesn't get cut off
+    plot.margin = margin(t = 10, r = 10, b = 20, l = 10),
+    
+    panel.border = element_rect(color = "gray", fill = NA, size = 0.5),
+    strip.text = element_text(face = "bold", size = 11)
+  )
+sig_gaps_count_plot
+
+ggsave("anova_contrast_pairs.png", plot = sig_gaps_count_plot, width = 10, height = 6, units = "in", dpi = 300)
+```
+
+Two separate
+```
+# Create the plot
+ggplot(sig_gaps_before, aes(x = n, y = contrast, fill = change)) + 
+  
+  # Side-by-side bars
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  
+  # Add the numbers next to the bars
+  geom_text(aes(label = n), 
+            position = position_dodge(width = 0.8), 
+            hjust = -0.2, 
+            size = 3) +
+  
+  # Formatting
+  labs(
+    title = "Frequency of Differences by Demographic Pair",
+    subtitle = "Sorted alphabetically by contrast group",
+    x = "Number of Significant Occurrences",
+    y = NULL, 
+    fill = "Direction"
+  ) +
+  
+  # Alphabetical Sort Configuration
+  scale_y_discrete(
+    limits = rev, # Reverses the axis so "A" starts at the top
+    labels = function(x) str_wrap(x, width = 30)
+  ) +
+  
+  # Custom Colors
+  scale_fill_manual(values = c("greater than" = "#0072B2", "less than" = "#D55E00")) +
+  
+  theme_minimal() +
+  theme(
+    legend.position = "top",
+    axis.text.y = element_text(size = 9),
+    panel.grid.major.y = element_blank()
+  )
+
+# Create the plot
+ggplot(sig_gaps_after, aes(x = n, y = contrast, fill = change)) + 
+  
+  # Side-by-side bars
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  
+  # Add the numbers next to the bars
+  geom_text(aes(label = n), 
+            position = position_dodge(width = 0.8), 
+            hjust = -0.2, 
+            size = 3) +
+  
+  # Formatting
+  labs(
+    title = "Frequency of Differences by Demographic Pair",
+    subtitle = "Sorted alphabetically by contrast group",
+    x = "Number of Significant Occurrences",
+    y = NULL, 
+    fill = "Direction"
+  ) +
+  
+  # Alphabetical Sort Configuration
+  scale_y_discrete(
+    limits = rev, # Reverses the axis so "A" starts at the top
+    labels = function(x) str_wrap(x, width = 30)
+  ) +
+  
+  # Custom Colors
+  scale_fill_manual(values = c("greater than" = "#0072B2", "less than" = "#D55E00")) +
+  
+  theme_minimal() +
+  theme(
+    legend.position = "top",
+    axis.text.y = element_text(size = 9),
+    panel.grid.major.y = element_blank()
+  )
+```
+*Did Fareeza analyze different precincts in chi square after re-upload?* Jackson completed two-way ANOVA on every single precinct or all 20 precincts as a whole? \*Why using mixed linear model? What is that?
+
+```{r}
+library(tidyverse)
+library(stringr)
+
+# 1. Define the exact contrast labels from your data
+target_pairs <- c(
+  "BLACK - WHITE",
+  "(ASIAN / PACIFIC ISLANDER) - BLACK",
+  "(AMERICAN INDIAN/ALASKAN NATIVE) - WHITE"
+)
+
+# 2. Define cleaner names to make the plot headers look exactly like your mock-up
+clean_pair_names <- c(
+  "BLACK - WHITE" = "Black\nvs White",
+  "(ASIAN / PACIFIC ISLANDER) - BLACK" = "Asian/Pacific Islander\nvs Black",
+  "(AMERICAN INDIAN/ALASKAN NATIVE) - WHITE" = "Am. Indian/Alaska Native\nvs White"
+)
+
+# 3. Transform your REAL data into the dot-matrix format
+plot_ready_df <- final_posthoc_df |>
+  # Keep only the 3 specific comparisons you want to visualize
+  filter(contrast %in% target_pairs) |>
+  
+  # Map the messy contrast names to the clean labels
+  mutate(
+    pair = clean_pair_names[contrast],
+    pair = factor(pair, levels = c("Am. Indian/Alaska Native\nvs White", 
+                                   "Asian/Pacific Islander\nvs Black", 
+                                   "Black\nvs White"))
+  ) |>
+  
+  # Determine if each precinct is Overrepresented, Underrepresented, or Not Significant
+  mutate(
+    outcome = case_when(
+      p.value >= 0.05 ~ "NS",
+      p.value < 0.05 & estimate > 0 ~ "Over",
+      p.value < 0.05 & estimate < 0 ~ "Under"
+    ),
+    outcome = factor(outcome, levels = c("Over", "Under", "NS")),
+    
+    # Format the time period to match the plot's expected capitalization
+    phase = factor(time_period, 
+                   levels = c("before Patternizr", "after Patternizr"),
+                   labels = c("Before Patternizr", "After Patternizr"))
+  ) |>
+  
+  # Group by phase and pair so we can assign grid coordinates to the 20 precincts
+  group_by(phase, pair) |>
+  
+  # IMPORTANT: Sort by outcome first so all the colored dots cluster together nicely
+  arrange(outcome, precinct_crime, .by_group = TRUE) |>
+  
+  # Assign an index (1 to 20) and calculate the 10x2 grid layout
+  mutate(
+    dot_index = row_number(),
+    col = (dot_index - 1) %% 10 + 1,
+    row = (dot_index - 1) %/% 10 + 1
+  ) |>
+  ungroup()
+
+# 4. Define your colors
+dot_colors <- c(
+  "Over"  = "#185FA5",
+  "Under" = "#D85A30",
+  "NS"    = "#D3D1C7"
+)
+
+# 5. Build the Plot using your new 'plot_ready_df'
+patternizr_dot_matrix <- ggplot(plot_ready_df, aes(x = col, y = row, fill = outcome)) +
+  geom_point(shape = 21, size = 4.5, color = "white", stroke = 0.4) +
+  facet_grid(
+    pair ~ phase,
+    switch = "y"
+  ) +
+  scale_fill_manual(
+    values = dot_colors,
+    labels = c("Overrepresented", "Underrepresented", "Not significant"),
+    name   = NULL
+  ) +
+  scale_y_reverse() +
+  coord_equal() +
+  labs(
+    title    = "Significant differences: before vs. after Patternizr",
+    subtitle = "Each dot represents 1 of 20 precincts tested per group pair",
+    caption  = "Colored dots = precincts where group 1 is significantly over- or underrepresented relative to group 2"
+  ) +
+  theme_minimal(base_size = 12, base_family = "sans") +
+  theme(
+    strip.text.y.left   = element_text(angle = 0, hjust = 1, size = 10, face = "bold"),
+    strip.text.x        = element_text(size = 11, face = "bold", margin = margin(b = 8)),
+    strip.placement       = "outside",
+    axis.text  = element_blank(),
+    axis.title = element_blank(),
+    axis.ticks = element_blank(),
+    panel.grid = element_blank(),
+    legend.position  = "top",
+    legend.justification = "center",
+    legend.key.size  = unit(0.4, "cm"),
+    legend.text      = element_text(size = 10),
+    plot.title    = element_text(face = "bold", size = 14, hjust = 0.5),
+    plot.subtitle = element_text(size = 10, hjust = 0.5, color = "gray40", margin = margin(b = 12)),
+    plot.caption  = element_text(size = 8, color = "gray50", hjust = 0.5, margin = margin(t = 10)),
+    panel.spacing.x = unit(1.5, "cm"),
+    panel.spacing.y = unit(0.8, "cm"),
+    plot.margin     = margin(15, 15, 10, 15)
+  )
+
+ggsave("patternizr_dot_matrix.png", plot = patternizr_dot_matrix, width = 6, height = 4, units = "in", dpi = 300)
+
+```

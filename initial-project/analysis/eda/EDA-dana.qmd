@@ -1,0 +1,114 @@
+---
+title: "5100 Final Project EDA"
+author: "Dana Kim"
+format: 
+  html:
+    embed-resources: true
+toc: true
+---
+
+## Demographics: race, age, sex
+
+```{r}
+#READ IN CLEANED DATA
+library(tidyverse)
+
+complaints_tbl <- read_csv("../../data/cleaning/violent_felony_cleaned_2.csv")
+head(complaints_tbl)
+complaints_tbl
+(nrow(complaints_tbl)) #number of rows in original tbl: 892,892
+```
+
+```{r}
+library(ggplot2)
+
+#FILTER OUT WHERE RACE IS NULL
+complaints_tbl_race <- complaints_tbl |> 
+  filter(susp_race != "(null)")
+
+head(complaints_tbl_race)
+(nrow(complaints_tbl_race)) #number of rows where race is not null: 529,628
+
+#VISUALIZE RACE BEFORE VS AFTER PATTERNIZR
+ggplot(data=complaints_tbl_race, aes(x=time_period, fill=susp_race)) +
+  geom_bar()
+#overall more complaints after than before patternizr
+#is the increase proportional before vs. after patternizr?
+
+#EXPORT TO CSV
+#write_csv(complaints_tbl_race, "null_race_removed.csv")
+```
+
+```{r}
+#confirm that the code is separately calculating before and after Patternizr for each race
+black_before <- sum(complaints_tbl_race$susp_race == "BLACK" & complaints_tbl_race$time_period == "before Patternizr")
+black_after <- sum(complaints_tbl_race$susp_race == "BLACK" & complaints_tbl_race$time_period == "after Patternizr")
+
+sum(complaints_tbl_race$susp_race == "BLACK")
+black_after + black_before
+
+#create tbl of counts
+race_count_trbl <- tribble(
+  ~race, ~count, ~time_period,
+  "Black",  black_before, "before Patternizr",
+  "Black",  black_after, "after Patternizr"
+)
+
+
+head(race_count_trbl)
+
+```
+
+```{r}
+#FILTER OUT NULL SEX
+complaints_tbl_sex <- complaints_tbl |> 
+  filter(susp_sex != "(null)")
+
+head(complaints_tbl_sex)
+(nrow(complaints_tbl_sex)) #number of rows where sex is not null: 506,530
+
+#VISUALIZE DISTRIBUTION OF SEX BEFORE AND AFTER PATTERNIZR
+ggplot(data=complaints_tbl_sex, aes(x=time_period, fill=susp_sex)) +
+  geom_bar()
+
+#EXPORT TO CSV
+#write_csv(complaints_tbl_sex, "null_sex_removed.csv")
+```
+
+```{r}
+#FILTER OUT NULL AGE GROUP
+
+valid_groups <- c("<18", "18-24", "25-44", "45-64", "65+", "UNKNOWN")
+
+complaints_tbl_age <- complaints_tbl |> 
+  filter(susp_age_group != "(null)") |>
+  filter(susp_age_group %in% valid_groups)
+
+(nrow(complaints_tbl_age)) #number of rows where sex is not null: 357,313
+head(complaints_tbl_age)
+complaints_tbl_age$susp_age
+
+ggplot(data=complaints_tbl_age, aes(x=time_period, fill=susp_age_group)) +
+  geom_bar()
+
+table(complaints_tbl_age$susp_age_group)
+
+#EXPORT TO CSV
+#write_csv(complaints_tbl_age, "null_age_removed.csv")
+```
+
+```{r}
+#FILTER OUT WHERE NULL IN AGE, RACE, OR SEX
+complaints_nonull_demographic <- complaints_tbl |>
+  filter(susp_age_group != "(null)") |>
+  filter(susp_age_group %in% valid_groups) |> #removed any age groups that were non-sensical
+  filter(susp_race != "(null)") |>
+  filter(susp_sex != "(null)")
+
+nrow(complaints_nonull_demographic) #355,241
+
+nrow(complaints_tbl) - nrow(complaints_nonull_demographic) #537,651
+
+#EXPORT TO CSV
+#write_csv(complaints_nonull_demographic, "null_demographics_removed.csv")
+```

@@ -1,0 +1,189 @@
+```{r}
+#get rid of unknown value in race column 
+data <- read.csv("../../data/cleaning/null_demographics_removed.csv")
+#check columns 
+#head(data)
+#check how many unknowns pre removing unknowns
+#sum(data$susp_race == "UNKNOWN", na.rm = TRUE)
+
+#remove unknowns 
+data <- data[data$susp_race != "UNKNOWN", ]
+sum(data$susp_race == "UNKNOWN", na.rm = TRUE)
+
+head(data)
+nrow(data)
+```
+
+```{r}
+# Get the top 20 precincts by crime count
+top_precincts_table <- data %>%
+  count(precinct_crime, sort = TRUE) %>%    # count crimes per precinct
+  slice_max(n, n = 20) %>%                  # keep top 20
+  arrange(precinct_crime)                   # sort ascending
+
+print(top_precincts_table)
+
+# Turn that table into a simple vector of precinct IDs
+top_precincts <- top_precincts_table$precinct_crime
+
+# Filter main data to only those top 20 precincts
+df_tp_race <- data %>%
+  filter(precinct_crime %in% top_precincts)
+
+# Vector of precincts we'll loop over
+precincts <- sort(unique(df_tp_race$precinct_crime))
+precincts
+```
+
+```{r}
+# 2. Run chi-square tests for race x time_period in each precinct
+race_chi_results <- tibble()
+
+for (p in precincts) {
+  # Subset to this precinct
+  df_p <- df_tp_race %>%
+    filter(precinct_crime == p)
+  
+  # Contingency table: race × time_period
+  tab <- table(df_p$susp_race, df_p$time_period)
+  
+  # Skip if table is degenerate (e.g., only one row/column)
+  if (nrow(tab) < 2 || ncol(tab) < 2) next
+  
+  # Chi-square test
+  chi <- chisq.test(tab)
+  
+  # Store results
+  race_chi_results <- race_chi_results %>%
+    bind_rows(tibble(
+      precinct_crime = p,
+      statistic      = as.numeric(chi$statistic),
+      p_value        = chi$p.value,
+      df             = as.numeric(chi$parameter)
+    ))
+}
+
+race_chi_results
+
+#write.csv(race_chi_results,
+#          "race_precinct_chi_results.csv",
+#          row.names = FALSE)
+
+```
+
+```{r}
+# 3. Precincts with statistically significant race distribution change
+sig_race_chi_results <- race_chi_results %>%
+  filter(p_value < 0.05)
+
+sig_race_chi_results
+
+sig_race_chi_precincts <- sig_race_chi_results %>%
+  distinct(precinct_crime) %>%
+  pull()
+
+sig_race_chi_precincts
+
+#write.csv(sig_race_chi_precincts,
+#          "race_precinct_chi_result_significant.csv",
+#          row.names = FALSE)
+
+```
+
+```{r}
+# 4a. Post-hoc standardized residuals for each cell (race x time_period)
+race_posthoc_results <- tibble()
+
+for (p in precincts) {
+  
+  df_p <- df_tp_race %>%
+    filter(precinct_crime == p)
+  
+  tab <- table(df_p$susp_race, df_p$time_period)
+  
+  # Skip if not a proper 2D table
+  if (nrow(tab) < 2 || ncol(tab) < 2) next
+  
+  chi <- chisq.test(tab)
+  
+  # Standardized residuals matrix
+  resid_mat <- chi$stdres
+  
+  # Tidy version
+  resid_df <- as.data.frame(as.table(resid_mat)) %>%
+    as_tibble() %>%
+    rename(
+      susp_race    = Var1,
+      time_period  = Var2,
+      std_residual = Freq
+    ) %>%
+    mutate(
+      precinct_crime = p,
+      chi_statistic  = as.numeric(chi$statistic),
+      p_value        = chi$p.value
+    )
+  
+  race_posthoc_results <- race_posthoc_results %>%
+    bind_rows(resid_df)
+}
+
+race_posthoc_results
+
+#write.csv(race_posthoc_results,
+#          "race_chi_posthoc_results.csv",
+#          row.names = FALSE)
+
+
+sorted_residuals <- race_posthoc_results |>
+  arrange(desc(abs(std_residual)))
+
+print(sorted_residuals)
+```
+
+```{r}
+#4. Before/after shift in standardized residuals (by race)
+race_shift_results <- race_posthoc_results %>%
+  select(precinct_crime, susp_race, time_period, std_residual) %>%
+  mutate(
+    time_period = ifelse(time_period == "before Patternizr", "before", "after")
+  ) %>%
+  tidyr::pivot_wider(
+    names_from  = time_period,
+    values_from = std_residual
+  ) %>%
+  mutate(
+    shift = after - before   # positive = more overrepresented after
+  )
+
+# Large positive shifts
+race_shift_results %>% filter(shift > 2)
+
+# Large negative shifts
+race_shift_results %>% filter(shift < -2)
+
+race_shift_results %>%
+  arrange(desc(abs(shift))) %>%
+  head(20)
+
+```
+
+```{r}
+```
+
+```{r}
+```
+
+```{r}
+```
+
+```{r}
+```
+
+```{r}
+```
+
+```{r}
+```
+
+```{r}
+```

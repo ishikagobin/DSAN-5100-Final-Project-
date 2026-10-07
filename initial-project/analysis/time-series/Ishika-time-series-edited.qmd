@@ -1,0 +1,416 @@
+---
+title: "DSAN5100 Lab 12 Assignment"
+author: "Dr. Purna Gamage"
+format: 
+  html:
+    embed-resources: true
+editor: visual
+toc: true
+---
+
+------------------------------------------------------------------------
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+    echo = TRUE,
+    message = FALSE,
+    warning = FALSE)
+```
+
+```{r, echo=FALSE,message=FALSE,warning=FALSE}
+# Install if needed:
+# install.packages(c("tidyverse", "lubridate", "plotly",
+#                    "forecast", "tseries", "astsa"))
+
+library(tidyverse)
+library(lubridate)
+library(plotly)
+library(forecast)
+library(tseries)
+library(astsa)
+
+```
+
+## Problem 1
+
+1.  Load and clean code to get time right??
+
+```{r}
+
+
+
+#get the data 
+data <- readr::read_csv(
+  "../../data/cleaning/violent_felony_cleaned.csv",
+  col_types = cols(
+    CMPLNT_FR_DT = col_date(format = "%Y-%m-%d"),
+    CMPLNT_FR_TM = col_time(format = "%H:%M:%S"),
+    RPT_DT       = col_date(format = "%m/%d/%Y"),
+    .default     = col_guess()
+  )
+)
+
+#creating the time variables 
+
+data <- data %>%
+  mutate(
+    # exact datetime of complaint
+    complaint_datetime = as.POSIXct(
+      paste(CMPLNT_FR_DT, CMPLNT_FR_TM),
+      format = "%Y-%m-%d %H:%M:%S",
+      tz = "America/New_York"
+    ),
+    
+    # delay (in days) between complaint date and report date
+    report_delay_days = as.numeric(RPT_DT - CMPLNT_FR_DT),
+    
+    # floor complaint date to month for aggregations
+    month = floor_date(CMPLNT_FR_DT, unit = "month")
+  ) %>%
+  filter(!is.na(month), !is.na(report_delay_days)) %>%
+  # drop negative/insane delays if any
+  filter(report_delay_days >= 0)
+
+data
+```
+```{r}
+violent_felony_cleaned_2 <- read_csv("../../data/cleaning/violent_felony_cleaned_2.csv")
+violent_felony_cleaned_2
+```
+
+
+2.  Monthly Helper
+
+```{r}
+
+make_monthly_ts <- function(df, value_col = mean_delay) {
+  monthly <- df %>%
+    group_by(month) %>%
+    summarise(
+      n_cases    = n(),
+      mean_delay = mean(report_delay_days, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    # ensure continuous monthly index
+    complete(
+      month = seq.Date(min(month), max(month), by = "month")
+    )
+  
+  start_year  <- year(min(monthly$month))
+  start_month <- month(min(monthly$month))
+  
+  ts_obj <- ts(
+    monthly[[rlang::as_name(ensym(value_col))]],
+    start     = c(start_year, start_month),
+    frequency = 12
+  )
+  
+  list(data = monthly, ts = ts_obj)
+}
+
+```
+
+3.  Rape Only
+
+```{r}
+rape_df <- data %>% filter(OFNS_DESC == "RAPE")
+rape_df
+
+rape_monthly <- make_monthly_ts(rape_df)
+rape_monthly
+
+rape_monthly_df <- rape_monthly$data
+rape_monthly_df
+
+rape_ts <- rape_monthly$ts
+rape_ts
+
+
+
+```
+
+3.  3.1 Basic time-series plot (ggplot)\
+    gah damn in the early years, rape cases were reported YEARSSSS later (bad bad bad)
+
+```{r}
+ggplot(rape_monthly_df, aes(x = month, y = mean_delay)) +
+  geom_line() +
+  geom_point() +
+  labs(
+    title = "Average Reporting Delay for Rape Cases (Monthly)",
+    x = "Month",
+    y = "Mean reporting delay (days)"
+  ) +
+  theme_minimal()
+
+```
+
+7.  Interactive Plotly figure (required by assignment)\
+    same plot but interactive
+
+```{r}
+plot_ly(
+  rape_monthly_df,
+  x = ~month,
+  y = ~mean_delay,
+  type = "scatter",
+  mode = "lines+markers",
+  name = "Mean delay"
+) %>%
+  layout(
+    title = "Average Reporting Delay for Rape Cases (Monthly, Interactive)",
+    xaxis = list(title = "Month"),
+    yaxis = list(title = "Mean reporting delay (days)")
+  )
+```
+
+8.  Classical decomposition. the seasonal, yearly bullshit we did in class that was 1 plot that we had to divide between 4.
+    -   observed panel: a **major structural change** in how rape cases were reported around the mid-2000s. 2000 to 2005 was BAD (like it would take 8 years for a case to be reported which is insane). confirms your series is **not stationary in its raw form.** which we been knew looking at the plot.
+
+    -   trend panel: The long-term reporting delay for rape cases **improved dramatically in the early 2000s**, and since then, it has remained consistently low. so ARIMA modeling needs differencing because this early downward trend introduces non-stationarity.
+
+    -   seasonal panel: reporting delays for rape cases follow a **stable yearly seasonal cycle**, meaning certain months consistently experience **higher or lower delays** relative to the yearly average. so using month as like the TIME in time series is good imo.
+
+    -   random panel: random noise. perf behavior for ARIMA modeling.
+
+```{r}
+#remove any leading NULLS 
+rape_ts_clean <- na.omit(rape_ts)
+
+decomp_rape <- decompose(rape_ts_clean, type = "multiplicative")
+plot(decomp_rape)
+```
+
+9.  **Create lag plots and ACF plot to** briefly explain what these patterns tell you about **relationships**(seasonality?, high correlation?..etc) in the data and whether the series appears **stationary**.\
+    Lag plots & ACF (relationships + stationarity intuition)\
+    \
+    This is the lag plot. the point is to make 12 scatterplot, 1 for each month. Straight diagonal-ish clouds → strong relationship → high autocorrelation.
+
+    The series is **highly correlated with its own past** (i.e., good candidate for ARIMA).
+
+```{r}
+# Lag plot (base R)
+stats::lag.plot(rape_ts_clean, lags = 12, do.lines = FALSE)
+```
+
+10. ACF plot\
+    ACF decays slowly → non-stationary (trend).
+
+```{r}
+    # ACF plot
+    acf(rape_ts_clean, lag.max = 36, main = "ACF: Rape reporting delay")
+
+    #PACF plot
+    pacf(rape_ts_clean, lag.max = 36, main = "PACF: Rape reporting delay")
+
+```
+
+11. ADF test
+    **Null hypothesis** H0​: series has a **unit root** → **non-stationary**.
+
+    **Alternative** H1​: series is **stationary**.
+    
+    P value is 0.887 hence we fail to reject unit root so it is non stationary. expected because of that big downward trend.
+
+
+```{r}
+adf_original <- adf.test(rape_ts_clean)
+adf_original
+
+# p-value > 0.05 → fail to reject unit root → non-stationary
+
+```
+
+11. Log transform (if variance increases over time)\
+    what's the mf point of log transform?? Sometimes the **variance grows with the level** — big values wiggle more than small ones. OH so doing log will compress big numbers more than small ones and stabilizes variance.
+
+    ```{r}
+    rape_ts_log <- log1p(rape_ts_clean)
+
+    par(mfrow = c(2, 1))
+    plot(rape_ts_clean, main = "Original series (Mean delay)")
+    plot(rape_ts_log, main = "Log-transformed series (log1p)")
+    par(mfrow = c(1, 1))
+
+    ```
+
+12. Differencing (first diff). So then in the report we can compare the ADF results and the ACF shapes **before and after** differencing.
+
+        p value is 0.01 so it is stationarity after differencing. YES SO WE CAN HAVE D=1 only 1 differencing needed WOOHOO.\
+        so Even after logging, the **mean** may still change over time (trend). this hopes to remove linear trend and makes the series more stationary.\
+        so why do we do ACF and PACF with the log differencing?\
+        -**ACF**: helps suggest **MA(q)** part.\
+        -PACF: helps suggest **PACF**: helps suggest **AR(p)** part.
+
+```{r}
+        rape_ts_log_diff <- diff(rape_ts_log, differences = 1)
+
+        # plot(rape_ts_log_diff,
+        #      main = "Differenced log series (d = 1)",
+        #      ylab = "Diff log1p(mean delay)")
+
+        acf(rape_ts_log_diff, lag.max = 36,
+             main = "ACF of differenced log series")
+        # pacf(rape_ts_log_diff, lag.max = 36,
+        #       main = "PACF of differenced log series")
+
+        # adf_diff <- adf.test(rape_ts_log_diff)
+        # adf_diff
+
+        # p-value < 0.05 → stationarity after differencing
+
+```
+
+Identify ARIMA orders & fit candidate models
+
+```{r}
+            d <- 1   # because we differenced once
+            candidate_models <- list(
+              c(0, 1, 1),
+              c(1, 1, 0),
+              c(1, 1, 1),
+              c(0, 1, 2)
+            )
+
+            fit_list <- list()
+            info_table <- tibble(
+              model = character(),
+              p = integer(),
+              d = integer(),
+              q = integer(),
+              AIC = numeric(),
+              BIC = numeric()
+            )
+
+            for (ord in candidate_models) {
+              p <- ord[1]; d <- ord[2]; q <- ord[3]
+              model_name <- paste0("ARIMA(", p, ",", d, ",", q, ")")
+              
+              fit <- Arima(rape_ts_log, order = c(p, d, q))
+              fit_list[[model_name]] <- fit
+              
+              info_table <- info_table %>%
+                add_row(
+                  model = model_name,
+                  p = p, d = d, q = q,
+                  AIC = AIC(fit),
+                  BIC = BIC(fit)
+                )
+            }
+
+            info_table %>% arrange(AIC)
+            info_table %>% arrange(BIC)
+
+```
+
+            Model 1: **ARIMA(0,1,1)** (BIC Winner)\
+            Model 2: **ARIMA(0,1,2)** (AIC Winner)\
+            Based on inspection of the ACF of the differenced log series, several candidate ARIMA models with d = 1 were considered. Table X presents their AIC and BIC values. ARIMA(0,1,2) achieved the lowest AIC, indicating the best overall fit, while ARIMA(0,1,1) achieved the lowest BIC, indicating the strongest balance between fit and parsimony. ARIMA(1,1,0) performed substantially worse and was excluded from further consideration. As a result, ARIMA(0,1,1) and ARIMA(0,1,2) were selected for full diagnostic evaluation.\
+            \
+            Running diagnostics on both ARIMA models and autoarima. gosh this is complicated to understand.
+
+            The auto.arima procedure selected a complex seasonal ARIMA model with multiple nonseasonal and seasonal parameters, reflecting the strong annual seasonality observed in the data. However, due to its high complexity and large number of parameters, this model was compared to simpler manually selected ARIMA candidates.
+
+            ARIMA(0,1,1) diagnostics:\
+            The ARIMA(0,1,1) model produced a highly significant MA(1) coefficient (t = −22.54, p \< 0.001), indicating strong short-term dependence in the differenced log series. The constant term was also statistically significant, capturing a small negative drift. The residual variance was low (σ² ≈ 0.212), and the model achieved the lowest BIC among all candidates, indicating an optimal balance between goodness-of-fit and parsimony.
+
+            ARIMA(0,1,2) diagnostics:\
+            Although ARIMA(0,1,2) achieved the lowest AIC, the second MA parameter was not statistically significant (p ≈ 0.087), suggesting that the added complexity does not provide meaningful explanatory improvement. Consequently, this model was not selected as the final forecasting model.
+
+            **Final model selection**
+
+            Based on combined evidence from AIC/BIC, parameter significance, and residual diagnostics, ARIMA(0,1,1) was selected as the final forecasting model for monthly rape reporting delay.
+
+```{r}
+            library(astsa)
+
+            fit_auto <- auto.arima(rape_ts_log)
+            fit_auto
+
+            sarima(rape_ts_log, p = 0, d = 1, q = 1)
+            sarima(rape_ts_log, p = 0, d = 1, q = 2)
+
+```
+
+13. **Compare ARIMA(0,1,1) vs Benchmark Models (MAE, MSE)\
+                **we are testing whether arima is better than **Naive forecast** (last value repeats) or **Mean forecast** (average repeats). if arima doesnt beat this then arima brings no added value
+
+```{r}
+            library(forecast)
+
+            # Best model (ARIMA(0,1,1))
+            fit_best <- Arima(rape_ts_log, order = c(0,1,1))
+
+            # Forecast horizon (2 years)
+            h <- 24
+
+            # Forecasts
+            fc_best  <- forecast(fit_best, h = h)
+            fc_naive <- naive(rape_ts_log, h = h)
+            fc_mean  <- meanf(rape_ts_log, h = h)
+
+            # Accuracy comparison
+            acc_best  <- accuracy(fc_best)
+            acc_naive <- accuracy(fc_naive)
+            acc_mean  <- accuracy(fc_mean)
+
+            acc_best
+            acc_naive
+            acc_mean
+
+```
+
+            Performance conclusion:\
+
+            -   ARIMA has the **lowest MAE\
+                **- ARIMA has the **lowest RMSE**
+            -   ARIMA has **MASE \< 1**
+            -   Mean forecast is **by far the worst**
+            -   Naive is decent but **clearly inferior to ARIMA\
+                **Forecast accuracy was evaluated using Mean Absolute Error (MAE), Root Mean Squared Error (RMSE), and Mean Absolute Scaled Error (MASE), and compared against naive and historical mean benchmark models. The ARIMA(0,1,1) model achieved the lowest MAE (0.323), lowest RMSE (0.464), and a MASE of 0.778, indicating superior forecasting performance relative to both benchmark approaches. The naive model produced larger forecast errors, while the mean model performed substantially worse. These results confirm that the ARIMA model captures meaningful temporal structure in the data that simple forecasting methods fail to capture.\
+                \
+                LAST STEP WOOHOOOO\
+                **Produce a final forecast plot** for your best model and write a short, clear interpretation of what the forecast indicates about future behavior.\
+                -we cant run this code on the log data, it must be done on the og data so go back to that\
+                Conclusion of dis plot:\
+                The ARIMA(0,1,1) forecast indicates that the average reporting delay for rape cases is expected to remain relatively stable over the next 24 months, with no strong upward or downward trend. This suggests that the major structural improvements observed in the early 2000s have stabilized and that reporting delays have reached a steady long-run level.
+
+```{r}
+            # Back-transform forecast from log to days
+            fc_best_days <- expm1(fc_best$mean)
+
+            # Create future date index
+            future_months <- seq(
+              from = max(rape_monthly_df$month) + months(1),
+              by = "month",
+              length.out = h
+            )
+
+            # Data frame for forecast
+            final_fc_df <- tibble(
+              month = future_months,
+              mean_delay_forecast_days = as.numeric(fc_best_days)
+            )
+
+            # FINAL FORECAST PLOT
+            ggplot() +
+              geom_line(
+                data = rape_monthly_df,
+                aes(x = month, y = mean_delay),
+                linewidth = 1
+              ) +
+              geom_line(
+                data = final_fc_df,
+                aes(x = month, y = mean_delay_forecast_days),
+                linetype = "dashed",
+                linewidth = 1
+              ) +
+              labs(
+                title = "Final Forecast of Average Reporting Delay for Rape Cases",
+                x = "Month",
+                y = "Mean reporting delay (days)"
+              ) +
+              theme_minimal()
+
+```
+

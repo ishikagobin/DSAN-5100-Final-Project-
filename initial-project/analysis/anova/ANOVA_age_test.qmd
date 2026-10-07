@@ -1,0 +1,211 @@
+---
+title: "Age Anova"
+format:
+    html:
+        embed-resources: true
+---
+
+```{r}
+### ============================================================
+###   ANOVA ASSUMPTION CHECKS + DIAGNOSTIC VISUALIZATIONS
+### ============================================================
+
+library(ggplot2)
+library(car)
+library(dplyr)
+
+check_anova_assumptions <- function(df) {
+  
+  # Ensure factors
+  df$susp_age_group <- factor(df$susp_age_group)
+  df$time_period <- factor(df$time_period)
+
+  # Fit model
+  fit <- aov(std_residual ~ susp_age_group * time_period, data = df)
+
+  ### ------------------------------------------------------------
+  ### 1. NORMALITY OF RESIDUALS
+  ### ------------------------------------------------------------
+  
+  # Extract residuals
+  res <- residuals(fit)
+
+  cat("\n=== SHAPIRO–WILK NORMALITY TEST ===\n")
+  print(shapiro.test(res))
+
+  # Q–Q plot
+  qq_plot <- ggplot(data.frame(residuals = res), 
+                    aes(sample = residuals)) +
+      stat_qq() +
+      stat_qq_line(color = "red", size = 1) +
+      labs(title = "Q–Q Plot of ANOVA Residuals",
+           x = "Theoretical Quantiles",
+           y = "Sample Quantiles") +
+      theme_minimal(base_size = 14)
+
+  print(qq_plot)
+
+
+  ### ------------------------------------------------------------
+  ### 2. HOMOGENEITY OF VARIANCE (EQUAL VARIANCES)
+  ### ------------------------------------------------------------
+  cat("\n=== LEVENE’S TEST FOR HOMOGENEITY OF VARIANCE ===\n")
+  print(leveneTest(std_residual ~ susp_age_group * time_period, data = df))
+
+  # Residuals vs fitted plot
+  fitted_vals <- fitted(fit)
+  rvf_plot <- ggplot(data.frame(fitted = fitted_vals, res = res),
+                     aes(x = fitted, y = res)) +
+      geom_point(alpha = 0.6) +
+      geom_hline(yintercept = 0, color = "red", size = 1) +
+      labs(title = "Residuals vs Fitted Values",
+           x = "Fitted Values",
+           y = "Residuals") +
+      theme_minimal(base_size = 14)
+
+  print(rvf_plot)
+
+
+  ### ------------------------------------------------------------
+  ### 3. OUTLIER CHECK
+  ### ------------------------------------------------------------
+  cook <- cooks.distance(fit)
+
+  cat("\n=== COOK'S DISTANCE: POTENTIAL OUTLIERS ===\n")
+  print(summary(cook))
+
+  cook_plot <- ggplot(data.frame(obs = seq_along(cook), cook = cook),
+                      aes(x = obs, y = cook)) +
+      geom_bar(stat = "identity") +
+      geom_hline(yintercept = 4/length(cook), color = "red", linetype = "dashed") +
+      labs(title = "Cook’s Distance for Outlier Detection",
+           x = "Observation",
+           y = "Cook’s Distance") +
+      theme_minimal(base_size = 14)
+
+  print(cook_plot)
+
+
+  ### ------------------------------------------------------------
+  ### 4. INDEPENDENCE (no test available—diagnose via plot)
+  ### ------------------------------------------------------------
+  ind_plot <- ggplot(data.frame(index = seq_along(res), res = res),
+                     aes(x = index, y = res)) +
+      geom_line(alpha = 0.7) +
+      geom_hline(yintercept = 0, color = "red", size = 1) +
+      labs(title = "Residuals Over Observation Order (Independence Check)",
+           x = "Observation Index",
+           y = "Residuals") +
+      theme_minimal(base_size = 14)
+
+  print(ind_plot)
+
+  #return(fit)
+}
+
+#LOAD DATA
+df <- read.csv('chi_posthoc_results.csv')
+df
+
+#RUN ASSUMPTIONS CHECK
+#fit <- 
+check_anova_assumptions(df) #outputs the fitted model with factored variables
+
+```
+
+```{r}
+library(ARTool)
+
+
+run_stdres_anova <- function(df) {
+  # Ensure the grouping variables are factors
+  df$susp_age_group <- factor(
+    df$susp_age_group,
+    levels = c("<18", "18-24", "25-44", "45-64", "65+")
+  )
+  df$time_period <- factor(df$time_period)
+
+  # Remove any incomplete cases just in case
+  df <- na.omit(df[, c("std_residual", "susp_age_group", "time_period")])
+
+  # Two-way ANOVA with interaction
+
+  art_fit <- art(std_residual ~ susp_age_group * time_period, data = df)
+
+  art_model <- anova(art_fit)
+  
+  return(art_fit)
+
+}
+```
+
+```{r}
+
+art_fit <- run_stdres_anova(df)
+anova_results <- anova(art_fit)
+
+print(anova_results)
+```
+When looking across all precincts, we can see that only the interaction effect of the age group and time period have a statistically significant effect on the residual. This means we cannot look at the main effects of age group and time period alone and the impact of whether that age group is over or under represented, since the effect of age group on over/underrepresentation is different before vs. after Patternizr.
+
+This suggests that Patternizr does have an important impact on over/underrepresentation of an age group in NYPD police complaints in this time frame, but that it does not impact all age groups uniformly. Rather, the change in representation varies significantly depending on the age group.
+
+Now we know the impact of Patternizr on representation of an age group varies, but we need to conduct a post-hoc test to which age groups are impacted differently in representation by Patternizr.
+
+```{r}
+library(emmeans)
+
+
+# Get the specific linear model where the interaction is aligned correctly
+interaction_model <- artlm(fit, "susp_age_group:time_period")
+
+# NOW you can run emmeans on that specific linear model
+emm <- emmeans(interaction_model, ~ susp_age_group * time_period)
+
+#A. Compare Time Periods WITHIN each Age Group
+# "Did the residuals change significantly for <18s? For 65+s?"
+# "Does Patternizr change results for specific Age Groups?
+posthoc_within_age <- contrast(emm, method = "pairwise", by = "susp_age_group")
+summary(posthoc_within_age, infer = TRUE)
+#add adjust=holm? for more conservative results
+
+# B. Compare Age Groups WITHIN each Time Period
+# "In the 'After' period, which ages are treated differently from each other?"
+# Are Age Groups different from each other within Time Periods?
+posthoc_within_period <- contrast(emm, method = "pairwise", by = "time_period")
+summary(posthoc_within_period, infer = TRUE)
+
+```
+
+```{r}
+library(ggplot2)
+
+ggplot(df, aes(x = susp_age_group, y = std_residual, 
+               color = time_period, group = time_period)) +
+  stat_summary(fun = mean, geom = "line", size = 1.2) +
+  stat_summary(fun = mean, geom = "point", size = 3) +
+  labs(
+    title = "Interaction Plot: Standardized Residuals by Age Group and Time Period",
+    x = "Age Group",
+    y = "Mean Standardized Residual"
+  ) +
+  theme_minimal(base_size = 14)
+
+
+```
+
+```{r}
+library(lme4)
+library(lmerTest)
+
+# Treat precinct_crime as a random grouping factor
+mixed_fit <- lmer(
+  std_residual ~ susp_age_group * time_period + (1 | precinct_crime),
+  data = df
+)
+
+summary(mixed_fit)
+anova(mixed_fit)
+
+
+```

@@ -21,4 +21,5 @@ analysis_clean.qmd
 
 # OS junk
 .DS_Store
-Thumbs.db
+Thumbs.dbinitial-project/cleaning/*.csv
+initial-project/analysis/anova/.RData
